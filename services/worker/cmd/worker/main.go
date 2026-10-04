@@ -1197,7 +1197,7 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	// builder. The video/audio builder intentionally strips connection (secrets),
 	// so doing this inside only one builder silently skipped custom media routes.
 	applyRequestTransform(payload, extraParams)
-	if isVideo {
+	if isVideo && !isDolaSeedanceAdapter(route.RuntimeRule) {
 		if err := ensureVideoModel(payload, upstreamModel, p.ModelCode); err != nil {
 			return result, err
 		}
@@ -1213,7 +1213,7 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 			payload["mask"] = mask
 		}
 	}
-	if isVideo || strings.EqualFold(stringAny(upstreamMediaConfig(route.RuntimeRule)["adapter"]), "native_media") {
+	if (isVideo && !isDolaSeedanceAdapter(route.RuntimeRule)) || strings.EqualFold(stringAny(upstreamMediaConfig(route.RuntimeRule)["adapter"]), "native_media") {
 		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 	}
 	if err := normalizePayloadMedia(ctx, payload, endpoint); err != nil {
@@ -2548,6 +2548,9 @@ func collapseMediaToString(v interface{}) string {
 
 // postVideoUpstream uses JSON (public image_url) or multipart (local/private reference file).
 func postVideoUpstream(ctx context.Context, conn connectionConfig, endpoint string, payload, runtimeRule map[string]interface{}, taskNo string) ([]byte, int, error) {
+	if isDolaSeedanceAdapter(runtimeRule) {
+		return postDolaVideoUpstream(ctx, conn, endpoint, payload, runtimeRule, taskNo)
+	}
 	target := joinBaseEndpoint(conn.BaseURL, endpoint)
 	refURL := ""
 	if s, ok := payload["image_url"].(string); ok {
@@ -2583,6 +2586,74 @@ func postVideoUpstream(ctx context.Context, conn connectionConfig, endpoint stri
 	log.Printf("Task %s video upstream JSON POST %s body=%s", taskNo, target, truncateText(string(body), 800))
 	respBody, statusCode, err := doJSONRequest(ctx, conn, "POST", target, body, timeout)
 	log.Printf("Task %s video upstream JSON response %d: %s", taskNo, statusCode, truncateText(string(respBody), 500))
+	return respBody, statusCode, err
+}
+
+func isDolaSeedanceAdapter(runtimeRule map[string]interface{}) bool {
+	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "dola_seedance_30s")
+}
+
+func postDolaVideoUpstream(ctx context.Context, conn connectionConfig, endpoint string, payload, runtimeRule map[string]interface{}, taskNo string) ([]byte, int, error) {
+	prompt := strings.TrimSpace(fmt.Sprint(payload["prompt"]))
+	if length := len([]rune(prompt)); length < 1 || length > 3000 {
+		return nil, 0, errors.New("Dola 提示词必须为 1～3000 个字符")
+	}
+	ratio := strings.TrimSpace(fmt.Sprint(payload["ratio"]))
+	allowedRatios := map[string]bool{"16:9": true, "9:16": true, "1:1": true, "3:4": true, "4:3": true, "21:9": true}
+	if !allowedRatios[ratio] {
+		return nil, 0, fmt.Errorf("Dola 不支持画面比例 %q", ratio)
+	}
+	if seconds := strings.TrimSpace(fmt.Sprint(payload["seconds"])); seconds != "30" {
+		return nil, 0, errors.New("Dola 视频时长固定为 30 秒")
+	}
+
+	references := referenceImageSources(payload["reference_images"])
+	if len(references) > 9 {
+		return nil, 0, errors.New("Dola 最多支持 9 张参考图")
+	}
+	const maxImageBytes = int64(20 << 20)
+	files := make([]multipartFile, 0, len(references))
+	var totalBytes int64
+	for index, source := range references {
+		remaining := maxImageBytes - totalBytes
+		if remaining <= 0 {
+			return nil, 0, errors.New("Dola 参考图总大小不能超过 20 MiB")
+		}
+		data, _, err := loadMediaBytesLimit(ctx, source, remaining)
+		if err != nil {
+			return nil, 0, fmt.Errorf("Dola 第 %d 张参考图读取失败: %w", index+1, err)
+		}
+		contentType := http.DetectContentType(data)
+		ext := ""
+		switch contentType {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/png":
+			ext = ".png"
+		default:
+			return nil, 0, fmt.Errorf("Dola 第 %d 张参考图仅支持 JPEG 或 PNG", index+1)
+		}
+		totalBytes += int64(len(data))
+		files = append(files, multipartFile{Field: "images[]", Name: fmt.Sprintf("reference-%d%s", index+1, ext), ContentType: contentType, Data: data})
+	}
+
+	target := joinBaseEndpoint(conn.BaseURL, endpoint)
+	fields := map[string]interface{}{"prompt": prompt, "ratio": ratio, "seconds": "30"}
+	timeout := upstreamRequestTimeout(runtimeRule, false)
+	log.Printf("Task %s Dola multipart POST %s images=%d bytes=%d", taskNo, target, len(files), totalBytes)
+	respBody, statusCode, err := doMultipartFilesRequest(ctx, conn, target, fields, files, timeout, 2<<20)
+	log.Printf("Task %s Dola response %d: %s", taskNo, statusCode, truncateText(string(respBody), 500))
+	if err == nil && statusCode >= 200 && statusCode < 300 {
+		var body map[string]interface{}
+		if json.Unmarshal(respBody, &body) == nil && strings.TrimSpace(fmt.Sprint(body["code"])) != "1" {
+			message := strings.TrimSpace(fmt.Sprint(body["message"]))
+			if message == "" || message == "<nil>" {
+				message = "Dola 创建视频任务失败"
+			}
+			err = errors.New(message)
+		}
+	}
 	return respBody, statusCode, err
 }
 
