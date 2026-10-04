@@ -85,6 +85,7 @@ export function ImageGenerationToolbar({
   onExactSizeChange,
   countOptions = DEFAULT_COUNT_OPTIONS,
   countMax = 50,
+  countAllowCustom = true,
   ratios = ALL_RATIOS,
   sizeTiers = IMAGE_SIZE_TIERS,
   showSizeTier = true,
@@ -101,6 +102,7 @@ export function ImageGenerationToolbar({
   onExactSizeChange?: (value: string) => void;
   countOptions?: number[];
   countMax?: number;
+  countAllowCustom?: boolean;
   ratios?: ImageAspectRatio[];
   sizeTiers?: ImageSizeTier[];
   showSizeTier?: boolean;
@@ -141,7 +143,7 @@ export function ImageGenerationToolbar({
                 {n} {imageUnit}
               </MediaMenuOption>
             ))}
-            <div className="mt-3 border-t border-gray-100 pt-3 dark:border-white/10">
+            {countAllowCustom && <div className="mt-3 border-t border-gray-100 pt-3 dark:border-white/10">
               <div className="mb-2 text-xs text-gray-500 dark:text-gray-400">{t("imageToolbar.customCount")}</div>
               <div className="flex items-center gap-3">
                 <input
@@ -165,7 +167,7 @@ export function ImageGenerationToolbar({
                   OK
                 </button>
               </div>
-            </div>
+            </div>}
           </div>
         )}
       </MediaOptionMenu>}
@@ -211,7 +213,7 @@ export function ImageGenerationToolbar({
                   close();
                 }}
               >
-                {item} · {getImagePixelSize(item, activeTier)}
+                {item}{showSizeTier ? ` · ${getImagePixelSize(item, activeTier)}` : ""}
               </MediaMenuOption>
             ))}
             <div className="mt-2 border-t border-gray-100 px-1 pt-2 text-[11px] font-semibold text-gray-400 dark:border-white/10">{t("imageToolbar.allRatios")}</div>
@@ -224,7 +226,7 @@ export function ImageGenerationToolbar({
                   close();
                 }}
               >
-                {item} · {getImagePixelSize(item, activeTier)}
+                {item}{showSizeTier ? ` · ${getImagePixelSize(item, activeTier)}` : ""}
               </MediaMenuOption>
             ))}
           </div>

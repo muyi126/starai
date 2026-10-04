@@ -14,23 +14,75 @@ func TestWaveSpeedLipSyncPayload(t *testing.T) {
 	}
 }
 
-func TestBuildDolaSeedancePayloadUsesFixedThirtySecondContract(t *testing.T) {
+func TestNativeMediaPreservesProtocolFieldsAndOmitsPrivateBilling(t *testing.T) {
+	rule := map[string]interface{}{"upstream": map[string]interface{}{"adapter": "native_media", "include": []interface{}{"reference_images", "n", "quality", "negative_prompt", "duration", "_price_rule_snapshot"}, "map": map[string]interface{}{"reference_images": "images"}}}
+	payload := BuildUpstreamVideoPayload("vidu", "viduq1", rule, nil, map[string]interface{}{"prompt": "test", "reference_images": []string{"https://example.test/ref.png"}, "n": 2, "quality": "hd", "negative_prompt": "bad", "duration": "5s", "_price_rule_snapshot": map[string]interface{}{"unit_price": 1}})
+	payload = SanitizeUpstreamPayload(payload, "/ent/v2/img2video")
+	if payload["images"] == nil || payload["n"] != float64(2) || payload["quality"] != "hd" || payload["negative_prompt"] != "bad" || payload["duration"] != float64(5) {
+		t.Fatalf("native fields lost: %#v", payload)
+	}
+	for key := range payload {
+		if len(key) > 0 && key[0] == '_' {
+			t.Fatalf("private field leaked: %s", key)
+		}
+	}
+}
+
+func TestNativeMediaExplicitEmptyIncludeIsAnAllowlist(t *testing.T) {
+	payload := BuildUpstreamVideoPayload("custom", "custom", map[string]interface{}{"upstream": map[string]interface{}{"adapter": "native_media", "include": []interface{}{}}}, nil, map[string]interface{}{"prompt": "hello", "count": 3, "quality": "hd", "asset_context": "internal"})
+	payload = SanitizeUpstreamPayload(payload, "/v1/images/generations")
+	if len(payload) != 2 || payload["model"] != "custom" || payload["prompt"] != "hello" {
+		t.Fatalf("explicit empty include leaked fields: %#v", payload)
+	}
+}
+
+func TestLegacyWanVideoPayloadUsesNamedImageFields(t *testing.T) {
+	rule := map[string]interface{}{"upstream": map[string]interface{}{"adapter": "aliyun_wan_video"}}
+	params := map[string]interface{}{"prompt": "hello", "first_frame": "https://example.test/first.png", "duration": 5, "resolution": "720P", "negative_prompt": "blur"}
+	payload := BuildUpstreamVideoPayload("wan", "wan2.6-i2v", rule, nil, params)
+	input := payload["input"].(map[string]interface{})
+	if input["img_url"] != params["first_frame"] || input["negative_prompt"] != "blur" || input["media"] != nil {
+		t.Fatalf("legacy input=%#v", input)
+	}
+	params["last_frame"] = "https://example.test/last.png"
+	payload = BuildUpstreamVideoPayload("wan", "wan2.2-kf2v", rule, nil, params)
+	input = payload["input"].(map[string]interface{})
+	if input["first_frame_url"] != params["first_frame"] || input["last_frame_url"] != params["last_frame"] || input["img_url"] != nil {
+		t.Fatalf("frame pair input=%#v", input)
+	}
+}
+
+func TestBuildTopEnRouterSeedancePayloadUsesJSONContentContract(t *testing.T) {
 	got := BuildUpstreamVideoPayload(
-		"dola-seedance-30s",
-		"dola-seedance-30s",
-		map[string]interface{}{"upstream": map[string]interface{}{"adapter": "dola_seedance_30s"}},
+		"dola-seedance-2",
+		"doubao-seedance-2.0",
+		map[string]interface{}{"upstream": map[string]interface{}{
+			"adapter": "topenrouter_seedance_2",
+			"include": []interface{}{"generation_mode", "duration", "ratio", "resolution", "generate_audio", "watermark", "reference_images"},
+		}},
 		nil,
 		map[string]interface{}{
-			"prompt":           "city sunrise",
-			"duration":         30,
+			"prompt":           "使用图片1生成城市日出",
+			"generation_mode":  "image",
+			"duration":         4,
 			"ratio":            "16:9",
-			"reference_images": []interface{}{"https://example.com/1.png", "https://example.com/2.jpg"},
+			"resolution":       "720p",
+			"generate_audio":   true,
+			"watermark":        false,
+			"reference_images": []interface{}{"https://example.com/1.png"},
 		},
 	)
-	encoded, _ := json.Marshal(got)
-	expected := `{"prompt":"city sunrise","ratio":"16:9","reference_images":["https://example.com/1.png","https://example.com/2.jpg"],"seconds":"30"}`
-	if string(encoded) != expected {
-		t.Fatalf("unexpected Dola payload: %s", encoded)
+	if got["model"] != "doubao-seedance-2.0" || got["duration"] != float64(4) || got["resolution"] != "720p" {
+		t.Fatalf("unexpected TopenRouter payload: %#v", got)
+	}
+	content, ok := got["content"].([]interface{})
+	if !ok || len(content) != 2 {
+		t.Fatalf("content=%#v, want text plus reference image", got["content"])
+	}
+	image, _ := content[1].(map[string]interface{})
+	imageURL, _ := image["image_url"].(map[string]interface{})
+	if image["role"] != "reference_image" || imageURL["url"] != "https://example.com/1.png" {
+		t.Fatalf("unexpected TopenRouter image content: %#v", image)
 	}
 }
 
@@ -277,6 +329,35 @@ func TestBuildOmniReferencePayloadUsesUpToSevenImages(t *testing.T) {
 		t.Fatalf("images len = %d, want 7", len(images))
 	}
 	for _, key := range []string{"generation_mode", "duration", "reference_images", "_video_upload_profile"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("%s must not be sent upstream: %#v", key, payload)
+		}
+	}
+}
+
+func TestBuildOctopusSDMiniPayloadUsesSecondsAndOmniImages(t *testing.T) {
+	runtimeRule := map[string]interface{}{
+		"video": map[string]interface{}{"upload_profile": "omni_reference"},
+		"upstream": map[string]interface{}{
+			"adapter": "octopus_sd_mini_v1",
+			"include": []interface{}{"generation_mode", "duration", "size", "reference_images"},
+		},
+	}
+	payload := BuildUpstreamVideoPayload(
+		"octopus-sd-mini", "seedance-2.0-mini-480p", runtimeRule, nil,
+		map[string]interface{}{
+			"prompt": "做个广告", "generation_mode": "reference", "duration": float64(15),
+			"size": "720x1280", "reference_images": []interface{}{"https://example.com/1.webp", "https://example.com/2.webp"},
+		},
+	)
+	payload = SanitizeUpstreamPayload(payload, "/v1/videos")
+	if payload["model"] != "seedance-2.0-mini-480p" || payload["seconds"] != "15" || payload["size"] != "720x1280" {
+		t.Fatalf("unexpected payload: %#v", payload)
+	}
+	if images := mediaURLList(payload["images"]); len(images) != 2 {
+		t.Fatalf("images = %#v, want two references", payload["images"])
+	}
+	for _, key := range []string{"duration", "generation_mode", "reference_images"} {
 		if _, exists := payload[key]; exists {
 			t.Fatalf("%s must not be sent upstream: %#v", key, payload)
 		}

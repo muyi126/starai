@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { Globe, Upload, ChevronDown, BookOpen, UserRound, Shield, X, Film, FileText, Image as ImageIcon, Lock, Zap, Trash2, Sparkles, Users, Plus } from "lucide-react";
 import { api, createRole, deleteAsset, listAssets, listChannelPresets, listRoleTemplates, listRoles, uploadAsset, uploadFile } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
 import { AssetPagination } from "./AssetPagination";
-import { SystemAssetLibraryDialog, type SystemAssetPick } from "./SystemAssetLibraryDialog";
+import type { SystemAssetPick } from "./SystemAssetLibraryDialog";
 import { filterReferenceCases, loadReferenceGalleryManifest, referenceImageURL, type ReferenceGalleryItem } from "./galleryReference";
+
+const SystemAssetLibraryDialog = dynamic(() => import("./SystemAssetLibraryDialog").then(module => module.SystemAssetLibraryDialog));
 
 export type ReferenceImagePick = { url: string; name: string; public_id?: string };
 
@@ -1221,7 +1224,7 @@ export function ChatTopTools({
         </div>
       )}
 
-      <SystemAssetLibraryDialog
+      {assetOpen && <SystemAssetLibraryDialog
         open={assetOpen}
         kind={referencePickMode ? "image" : "all"}
         title={referencePickMode ? assetLibraryLabel || t("asset.selectReferenceFromLibrary") : t("asset.selectFromLibrary")}
@@ -1235,7 +1238,7 @@ export function ChatTopTools({
           else set({ asset_ids: items.map((item) => item.public_id).filter((id): id is string => !!id) });
           setAssetOpen(false);
         }}
-      />
+      />}
 
       {/* Legacy markup retained temporarily for upload-management actions; the unified dialog is the visible picker. */}
       {assetOpen && !USE_SYSTEM_ASSET_LIBRARY && (

@@ -23,58 +23,57 @@ func TestParseQwenImageChoicesResponse(t *testing.T) {
 	}
 }
 
-func TestPostDolaVideoUpstreamUsesMultipartWithOptionalImages(t *testing.T) {
-	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0, 'I', 'H', 'D', 'R'}
-	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 'J', 'F', 'I', 'F', 0}
-	for _, tc := range []struct {
-		name string
-		refs []interface{}
-	}{
-		{name: "text only"},
-		{name: "two images", refs: []interface{}{
-			"data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
-			"data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg),
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data;") {
-					t.Errorf("content-type=%q", r.Header.Get("Content-Type"))
-				}
-				if r.Header.Get("Idempotency-Key") != "task-dola-1" {
-					t.Errorf("idempotency=%q", r.Header.Get("Idempotency-Key"))
-				}
-				if err := r.ParseMultipartForm(21 << 20); err != nil {
-					t.Errorf("parse multipart: %v", err)
-				}
-				if r.FormValue("prompt") != "city sunrise" || r.FormValue("ratio") != "16:9" || r.FormValue("seconds") != "30" {
-					t.Errorf("fields prompt=%q ratio=%q seconds=%q", r.FormValue("prompt"), r.FormValue("ratio"), r.FormValue("seconds"))
-				}
-				if got := len(r.MultipartForm.File["images[]"]); got != len(tc.refs) {
-					t.Errorf("images=%d want=%d", got, len(tc.refs))
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{"code":"1","task_id":"dola-task-1","status":"queued"}`))
-			}))
-			defer server.Close()
+func TestPostTopEnRouterSeedanceUsesJSONTaskContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/video/tasks" || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("path=%q content-type=%q", r.URL.Path, r.Header.Get("Content-Type"))
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-test" {
+			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode JSON: %v", err)
+		}
+		if payload["model"] != "doubao-seedance-2.0" {
+			t.Errorf("payload=%#v", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"task-seedance-2"}`))
+	}))
+	defer server.Close()
 
-			payload := map[string]interface{}{"prompt": "city sunrise", "ratio": "16:9", "seconds": "30"}
-			if len(tc.refs) > 0 {
-				payload["reference_images"] = tc.refs
-			}
-			runtimeRule := map[string]interface{}{"upstream": map[string]interface{}{
-				"adapter": "dola_seedance_30s", "request_timeout_sec": 5,
-			}}
-			conn := connectionConfig{BaseURL: server.URL, AuthType: "none", Headers: map[string]string{"Idempotency-Key": "task-dola-1"}}
-			body, status, err := postVideoUpstream(context.Background(), conn, "/api/v1/videos", payload, runtimeRule, "local-task")
-			if err != nil || status != http.StatusOK {
-				t.Fatalf("status=%d err=%v body=%s", status, err, body)
-			}
-			_, taskID := parseUpstreamMedia(body)
-			if taskID != "dola-task-1" {
-				t.Fatalf("taskID=%q", taskID)
-			}
-		})
+	payload := map[string]interface{}{
+		"model":      "doubao-seedance-2.0",
+		"content":    []interface{}{map[string]interface{}{"type": "text", "text": "city sunrise"}},
+		"duration":   4,
+		"ratio":      "16:9",
+		"resolution": "720p",
+	}
+	runtimeRule := map[string]interface{}{"upstream": map[string]interface{}{
+		"adapter": "topenrouter_seedance_2", "request_timeout_sec": 5,
+	}}
+	conn := connectionConfig{BaseURL: server.URL, APIKey: "sk-test", AuthType: "bearer", APIKeyHeader: "Authorization"}
+	body, status, err := postVideoUpstream(context.Background(), conn, "/v1/video/tasks", payload, runtimeRule, "local-task")
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v body=%s", status, err, body)
+	}
+	_, taskID := parseUpstreamMedia(body)
+	if taskID != "task-seedance-2" {
+		t.Fatalf("taskID=%q", taskID)
+	}
+}
+
+func TestEnsureVideoModelFillsFinalPayload(t *testing.T) {
+	payload := map[string]interface{}{"model": ""}
+	if err := ensureVideoModel(payload, "doubao-seedance-2.0", "fallback-code"); err != nil {
+		t.Fatal(err)
+	}
+	if payload["model"] != "doubao-seedance-2.0" {
+		t.Fatalf("model=%#v", payload["model"])
+	}
+	if err := ensureVideoModel(map[string]interface{}{}, "", ""); err == nil {
+		t.Fatal("expected missing model configuration error")
 	}
 }
 
@@ -783,14 +782,14 @@ func TestHardDownload404(t *testing.T) {
 	}
 }
 
-func TestParsePollConfigCorrectsLegacySoraVideosPath(t *testing.T) {
+func TestParsePollConfigPreservesExplicitGatewayPath(t *testing.T) {
 	cfg := parsePollConfig(map[string]interface{}{
 		"upstream": map[string]interface{}{
 			"poll_path": "/v1/video/generations/{id}",
 		},
 	}, "/v1/videos")
 
-	if cfg.Path != "/v1/videos/{id}" {
+	if cfg.Path != "/v1/video/generations/{id}" {
 		t.Fatalf("poll path = %q", cfg.Path)
 	}
 }

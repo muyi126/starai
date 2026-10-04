@@ -11,9 +11,11 @@ export function clearApiCache() {
 export function clearUserSession() {
   if (typeof window === "undefined") return;
   clearApiCache();
-  localStorage.removeItem("token");
-  localStorage.removeItem("starai_session");
-  localStorage.removeItem("user");
+  try {
+    localStorage.removeItem("token");
+    localStorage.removeItem("starai_session");
+    localStorage.removeItem("user");
+  } catch { /* cookie logout and expiry redirects still work when storage is blocked */ }
 }
 
 export function redirectToLogin() {
@@ -25,18 +27,23 @@ export function redirectToLogin() {
 
 export function hasUserSession() {
   if (typeof window === "undefined") return false;
-  return localStorage.getItem("starai_session") === "1" || !!localStorage.getItem("token");
+  try { return localStorage.getItem("starai_session") === "1" || !!localStorage.getItem("token"); } catch { return false; }
 }
 
 export function legacyAuthHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
-  const token = localStorage.getItem("token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  try {
+    const token = localStorage.getItem("token");
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch { return {}; }
 }
 
 function localeHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};
-  const locale = localStorage.getItem("site_locale") || "zh-CN";
+  let locale = "zh-CN";
+  try { locale = localStorage.getItem("site_locale") || locale; } catch {
+    if (typeof document !== "undefined") locale = document.documentElement.lang || locale;
+  }
   return { "X-Locale": locale, "Accept-Language": locale };
 }
 
@@ -152,7 +159,7 @@ function cachedRequest<T>(key: string, ttlMs: number, request: () => Promise<T>)
 /** Coalesces short-lived read-only requests so nested workbench panels do not refetch the same metadata. */
 export function apiCached<T>(path: string, ttlMs = 30_000, varyByLocale = true): Promise<T> {
   const locale = varyByLocale && typeof window !== "undefined"
-    ? localStorage.getItem("site_locale") || "zh-CN"
+    ? localeHeaders()["X-Locale"] || "zh-CN"
     : "shared";
   return cachedRequest(`${locale}:${path}`, ttlMs, () => api<T>(path));
 }
@@ -229,7 +236,7 @@ export async function listRoleTemplates() {
 }
 
 export async function listChannelPresets() {
-  return api<{ items: any[] }>("/api/channel-presets");
+  return apiCached<{ items: any[] }>("/api/channel-presets");
 }
 
 export { API_URL };

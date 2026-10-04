@@ -344,6 +344,11 @@ export default function SystemConfigPage() {
         web_search_unit_price: 0,
         web_search_router_model_code: "",
         agent_default_timezone: "Asia/Shanghai",
+        seedance_portrait_enabled: false,
+        seedance_volc_access_key: "",
+        seedance_volc_secret_key: "",
+        seedance_volc_project_name: "default",
+        seedance_gateway_base_url: "https://tp-api.chinadatapay.com:8000/seedance-gateway",
         customer_service_custom_script: "",
         customer_service_title: "联系客服",
         customer_service_name: "在线客服",
@@ -1401,6 +1406,19 @@ export default function SystemConfigPage() {
         </section>
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5 xl:col-span-2">
+          <div className="mb-1 text-sm font-semibold text-gray-900">Seedance 2.0 真人素材</div>
+          <p className="mb-5 text-xs leading-relaxed text-gray-400">火山 AK/SK 只保存在服务端，用于真人认证与私域素材库；用户端不会看到密钥。ProjectName 必须与 Seedance 推理资源所在项目一致。</p>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {renderItem({ key: "seedance_portrait_enabled", label: "启用真人素材库", type: "checkbox", hint: "配置并保存 AK/SK 后再开启。" })}
+            {renderItem({ key: "seedance_volc_project_name", label: "火山 ProjectName", type: "text", hint: "默认 default；大小写敏感，认证、素材和推理必须使用同一项目。" })}
+            {renderItem({ key: "seedance_volc_access_key", label: "火山 Access Key（AK）", type: "password", hint: "在火山访问控制的 Access Key 管理中获取；保存后仅显示掩码。" })}
+            {renderItem({ key: "seedance_volc_secret_key", label: "火山 Secret Key（SK）", type: "password", hint: "与上方 AK 配套；加密保存且不会下发到前台。" })}
+            <div className="md:col-span-2">{renderItem({ key: "seedance_gateway_base_url", label: "真人素材网关地址", type: "text", hint: "TopenRouter 使用 https://tp-api.chinadatapay.com:8000/seedance-gateway；一般无需修改。" })}</div>
+          </div>
+          <button type="button" disabled={saving} onClick={() => handleSave(Object.fromEntries(Object.entries(configs).filter(([key]) => key.startsWith("seedance_"))))} className="mt-5 rounded-xl bg-gray-950 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? "保存中..." : "保存真人素材配置"}</button>
+        </section>
+
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5 xl:col-span-2">
           <div className="mb-1 text-sm font-semibold text-gray-900">Agent 联网搜索</div>
           <p className="mb-5 text-xs leading-relaxed text-gray-400">供 Agent 通用智能体的“智能搜索”使用。RedFox 按官方同步 API 搜索抖音账号和作品；其他网页问题自动使用备用搜索。切换服务商后仅影响新发起的搜索。</p>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -1415,8 +1433,8 @@ export default function SystemConfigPage() {
             ], onChange: (value) => setConfigs((prev) => ({ ...prev, web_search_provider: value, web_search_enabled: true })), hint: "切换服务商时会同步开启智能搜索；如需停用，请在切换后手动关闭。" })}
             {["tavily", "brave", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_api_key", label: "搜索 API Key", type: "password", hint: "Tavily / Brave 使用；保存后只显示脱敏值，不会下发到用户端。" })}
             {String(configs.web_search_provider || "tavily") === "exa" && renderItem({ key: "web_search_exa_api_key", label: "Exa API Key", type: "password", hint: "在 Exa 控制台获取；独立保存，不覆盖其他搜索服务的密钥。使用标准搜索并获取相关网页摘录，消耗 Exa 账户额度。" })}
-            {["searxng", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_base_url", label: "SearXNG 服务地址", type: "text", hint: "内置生产环境填写 http://searxng:8080；本地开发填写 http://127.0.0.1:8888。" })}
-            {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_base_url", label: "备用 SearXNG 地址", type: "text", hint: "RedFox 未返回可核验网页来源时自动回退；留空则不回退。本地开发可填写 http://127.0.0.1:8888。" })}
+            {["searxng", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_base_url", label: "SearXNG 服务地址", type: "text", hint: "内置生产环境填写 http://searxng:8080；本地开发默认填写 http://127.0.0.1:8889（以 .env.local 的 SEARXNG_BIND_PORT 为准）。" })}
+            {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_base_url", label: "备用 SearXNG 地址", type: "text", hint: "RedFox 未返回可核验网页来源时自动回退；留空则不回退。本地开发默认填写 http://127.0.0.1:8889（以 .env.local 的 SEARXNG_BIND_PORT 为准）。" })}
             {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_api_key", label: "二级备用 Tavily API Key", type: "password", hint: "RedFox 和 SearXNG 都无可核验结果时使用；留空则不启用二级回退。保存后仅显示脱敏值。" })}
             {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_redfox_api_key", label: "RedFox 搜索 API Key", type: "password", hint: "只用于 Agent 联网搜索；保存后只显示脱敏值。" })}
             {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_redfox_base_url", label: "RedFox 搜索服务地址", type: "text", hint: "留空使用官方地址 https://redfox.hk；仅代理或私有网关场景需要修改。" })}

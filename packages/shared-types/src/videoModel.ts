@@ -1,6 +1,7 @@
 /** Video model runtime_rule.video + input_schema extensions (config-driven UI & API). */
 
 export type VideoUploadProfile =
+  | "first_frame"
   | "single_ref"
   | "multi_ref"
   | "frame_pair"
@@ -73,6 +74,8 @@ export interface SchemaFieldMeta {
   "x-highlight"?: boolean;
   /** Move a field to a model-specific prominent area instead of the bottom toolbar. */
   "x-placement"?: string;
+  /** Collapse related bottom-toolbar fields into one menu. */
+  "x-group"?: string;
   /** If true, value is omitted from upstream when equal to "auto" or false */
   "x-omit-auto"?: boolean;
 }

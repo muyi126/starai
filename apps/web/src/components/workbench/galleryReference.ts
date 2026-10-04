@@ -161,7 +161,7 @@ export function loadReferenceGalleryManifest(options: { force?: boolean } = {}) 
       }
     }
 
-    const response = await fetch(REFERENCE_MANIFEST_URL, { cache: "force-cache" });
+    const response = await fetch(REFERENCE_MANIFEST_URL, { cache: "force-cache", signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error(String(response.status));
     const data: unknown = await response.json();
     if (!isReferenceGalleryManifest(data)) throw new Error("invalid manifest");

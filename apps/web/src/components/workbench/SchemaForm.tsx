@@ -42,7 +42,8 @@ export function schemaDefaults(schema: unknown): Record<string, unknown> {
 
 function coerce(prop: SchemaProp, raw: string): unknown {
   if (prop.type === "number" || prop.type === "integer") {
-    const n = prop.type === "integer" ? parseInt(raw, 10) : parseFloat(raw);
+    if (!raw.trim()) return undefined;
+    const n = Number(raw);
     return Number.isNaN(n) ? raw : n;
   }
   return raw;
@@ -102,6 +103,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
       return (
         <input
           type="number"
+          step={prop.type === "integer" ? 1 : "any"}
           value={value === "" ? "" : Number(value)}
           min={prop.minimum}
           max={prop.maximum}

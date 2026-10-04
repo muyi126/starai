@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,6 +13,7 @@ import (
 var (
 	ErrInsufficientBalance = errors.New("insufficient balance")
 	ErrFreezeNotFound      = errors.New("freeze not found")
+	ErrInvalidAmount       = errors.New("amount must be finite")
 )
 
 const InsufficientBalanceMsg = "账户余额不足"
@@ -42,6 +44,16 @@ func (s *Service) Freeze(ctx context.Context, userID int64, amount float64, refT
 }
 
 func (s *Service) FreezeWithFinalize(ctx context.Context, userID int64, amount float64, refType, refID string, finalize func(pgx.Tx) error) error {
+	if err := requireFiniteAmounts(amount); err != nil {
+		return err
+	}
+	if amount > 0 {
+		// The compute ledger stores six decimals; every positive reservation must survive storage.
+		amount = math.Ceil(amount*1_000_000) / 1_000_000
+		if err := requireFiniteAmounts(amount); err != nil {
+			return err
+		}
+	}
 	if amount <= 0 {
 		if finalize == nil {
 			return nil
@@ -69,6 +81,9 @@ func (s *Service) FreezeWithFinalize(ctx context.Context, userID int64, amount f
 	if err != nil {
 		return err
 	}
+	if err := requireFiniteAmounts(balance, frozen); err != nil {
+		return err
+	}
 	var existingID int64
 	var existingAmount float64
 	existingErr := tx.QueryRow(ctx,
@@ -80,8 +95,15 @@ func (s *Service) FreezeWithFinalize(ctx context.Context, userID int64, amount f
 		return existingErr
 	}
 	if existingErr == nil {
-		delta := amount - existingAmount
-		if delta > 0 && balance-frozen < delta {
+		if err := requireFiniteAmounts(existingAmount); err != nil {
+			return err
+		}
+		delta := math.Round((amount-existingAmount)*1_000_000) / 1_000_000
+		available := math.Round((balance-frozen)*1_000_000) / 1_000_000
+		if err := requireFiniteAmounts(delta, available); err != nil {
+			return err
+		}
+		if delta > 0 && available < delta {
 			return ErrInsufficientBalance
 		}
 		if delta != 0 {
@@ -101,7 +123,10 @@ func (s *Service) FreezeWithFinalize(ctx context.Context, userID int64, amount f
 		}
 		return tx.Commit(ctx)
 	}
-	available := balance - frozen
+	available := math.Round((balance-frozen)*1_000_000) / 1_000_000
+	if err := requireFiniteAmounts(available); err != nil {
+		return err
+	}
 	if available < amount {
 		return ErrInsufficientBalance
 	}
@@ -130,6 +155,13 @@ func (s *Service) Charge(ctx context.Context, userID int64, freezeAmount, actual
 }
 
 func (s *Service) ChargeWithFinalize(ctx context.Context, userID int64, freezeAmount, actualAmount float64, refType, refID, txType, remark string, finalize func(pgx.Tx) error) error {
+	if err := requireFiniteAmounts(actualAmount); err != nil {
+		return err
+	}
+	actualAmount = math.Round(actualAmount*1_000_000) / 1_000_000
+	if err := requireFiniteAmounts(actualAmount); err != nil {
+		return err
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -179,6 +211,9 @@ func (s *Service) ChargeWithFinalize(ctx context.Context, userID int64, freezeAm
 	}
 
 	newBalance, newFrozen := settlementWalletValues(balance, frozen, lockedAmount, charge)
+	if err := requireFiniteAmounts(newBalance, newFrozen); err != nil {
+		return err
+	}
 
 	_, err = tx.Exec(ctx,
 		`UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`,
@@ -288,6 +323,9 @@ func sumLockedFreezes(ctx context.Context, tx pgx.Tx, userID int64, refType, ref
 			return 0, err
 		}
 		total += amount
+		if err := requireFiniteAmounts(amount, total); err != nil {
+			return 0, err
+		}
 	}
 	return total, rows.Err()
 }
@@ -297,6 +335,9 @@ func (s *Service) Credit(ctx context.Context, userID int64, amount float64, txTy
 }
 
 func (s *Service) CreditWithFinalize(ctx context.Context, userID int64, amount float64, txType, refType, refID, remark string, finalize func(pgx.Tx) error) error {
+	if err := requireFiniteAmounts(amount); err != nil {
+		return err
+	}
 	if amount <= 0 {
 		return errors.New("credit amount must be positive")
 	}
@@ -334,6 +375,9 @@ func (s *Service) CreditWithFinalize(ctx context.Context, userID int64, amount f
 	}
 
 	newBalance := balance + amount
+	if err := requireFiniteAmounts(newBalance); err != nil {
+		return err
+	}
 	_, err = tx.Exec(ctx,
 		`UPDATE wallets SET compute_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, userID)
 	if err != nil {
@@ -355,6 +399,9 @@ func (s *Service) CreditWithFinalize(ctx context.Context, userID int64, amount f
 }
 
 func (s *Service) CreditCash(ctx context.Context, userID int64, amount float64, txType, refType, refID, remark string) error {
+	if err := requireFiniteAmounts(amount); err != nil {
+		return err
+	}
 	if amount <= 0 {
 		return errors.New("cash credit amount must be positive")
 	}
@@ -385,6 +432,9 @@ func (s *Service) CreditCash(ctx context.Context, userID int64, amount float64, 
 	}
 
 	newBalance := balance + amount
+	if err := requireFiniteAmounts(newBalance); err != nil {
+		return err
+	}
 	_, err = tx.Exec(ctx, `UPDATE wallets SET cash_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, userID)
 	if err != nil {
 		return err
@@ -400,6 +450,9 @@ func (s *Service) CreditCash(ctx context.Context, userID int64, amount float64, 
 }
 
 func (s *Service) DebitCash(ctx context.Context, userID int64, amount float64, txType, refType, refID, remark string) error {
+	if err := requireFiniteAmounts(amount); err != nil {
+		return err
+	}
 	if amount <= 0 {
 		return errors.New("cash debit amount must be positive")
 	}
@@ -417,6 +470,9 @@ func (s *Service) DebitCash(ctx context.Context, userID int64, amount float64, t
 		return ErrInsufficientBalance
 	}
 	newBalance := balance - amount
+	if err := requireFiniteAmounts(newBalance); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, `UPDATE wallets SET cash_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, userID); err != nil {
 		return err
 	}
@@ -463,6 +519,9 @@ func (s *Service) AwardReferralOnRecharge(ctx context.Context, referredID int64,
 		return nil
 	}
 	amount := referralRewardAmount(rewardValue, rewardType, account, paidAmount, creditedAmount)
+	if err := requireFiniteAmounts(amount); err != nil {
+		return err
+	}
 	if amount <= 0 {
 		return nil
 	}
@@ -486,6 +545,9 @@ func (s *Service) AwardReferralOnRecharge(ctx context.Context, referredID int64,
 			return err
 		}
 		newBalance := balance + amount
+		if err := requireFiniteAmounts(newBalance); err != nil {
+			return err
+		}
 		if _, err = tx.Exec(ctx, `UPDATE wallets SET cash_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, referrerID); err != nil {
 			return err
 		}
@@ -500,6 +562,9 @@ func (s *Service) AwardReferralOnRecharge(ctx context.Context, referredID int64,
 			return err
 		}
 		newBalance := balance + amount
+		if err := requireFiniteAmounts(newBalance); err != nil {
+			return err
+		}
 		if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, referrerID); err != nil {
 			return err
 		}
@@ -605,6 +670,9 @@ func (s *Service) CountLedgerMismatches(ctx context.Context) (int, error) {
 }
 
 func (s *Service) AdjustBalance(ctx context.Context, userID int64, amount float64, remark string) error {
+	if err := requireFiniteAmounts(amount); err != nil {
+		return err
+	}
 	if amount == 0 {
 		return errors.New("adjustment amount must not be zero")
 	}
@@ -623,6 +691,9 @@ func (s *Service) AdjustBalance(ctx context.Context, userID int64, amount float6
 	}
 	deduct := -amount
 	newBalance := balance - deduct
+	if err := requireFiniteAmounts(newBalance); err != nil {
+		return err
+	}
 	_, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, userID)
 	if err != nil {
 		return err
@@ -635,4 +706,13 @@ func (s *Service) AdjustBalance(ctx context.Context, userID int64, amount float6
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func requireFiniteAmounts(amounts ...float64) error {
+	for _, amount := range amounts {
+		if math.IsNaN(amount) || math.IsInf(amount, 0) {
+			return ErrInvalidAmount
+		}
+	}
+	return nil
 }

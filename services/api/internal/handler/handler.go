@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -150,6 +151,11 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			auth.POST("/assets/batch", h.GetAssetsBatch)
 			auth.GET("/assets/:id", h.GetAsset)
 			auth.DELETE("/assets/:id", h.DeleteAsset)
+			auth.GET("/seedance/portrait-assets", h.ListSeedancePortraitAssets)
+			auth.POST("/seedance/portrait-assets", h.CreateSeedancePortraitAsset)
+			auth.POST("/seedance/portrait-assets/import", h.ImportSeedancePortraitAsset)
+			auth.POST("/seedance/portrait-sessions", middleware.RateLimit(h.cache, "seedance-portrait-session", 3, time.Second, middleware.UserIdentity), h.CreateSeedancePortraitSession)
+			auth.POST("/seedance/portrait-sessions/:id/complete", middleware.RateLimit(h.cache, "seedance-portrait-result", 3, time.Second, middleware.UserIdentity), h.CompleteSeedancePortraitSession)
 			auth.POST("/canvases", h.CreateCanvas)
 			auth.GET("/canvases", h.ListCanvases)
 			auth.GET("/canvases/:id", h.GetCanvas)
@@ -825,9 +831,20 @@ func (h *Handler) EstimateModel(c *gin.Context) {
 	var req struct {
 		Params map[string]interface{} `json:"params"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		util.BadRequest(c, "参数错误")
+		return
+	}
 	if req.Params == nil {
 		req.Params = map[string]interface{}{}
+	}
+	if m.RequestMode == "images" || m.RequestMode == "video" || m.RequestMode == "audio" {
+		params := service.MergeMediaTaskParams(m.DefaultParams, req.Params)
+		if err := service.NormalizeMediaEstimateParams(m, params); err != nil {
+			util.BadRequest(c, err.Error())
+			return
+		}
+		req.Params = params
 	}
 	if m.Category == "multi_collab" || m.Code == "multi_collab_chat" {
 		channelKey := ""
@@ -884,7 +901,7 @@ func (h *Handler) EstimateModel(c *gin.Context) {
 		}
 		cost := h.chat.EstimateModelsCost(c.Request.Context(), codes, req.Params)
 		cost += h.models.EstimateCost(m, req.Params, 0, 0)
-		if cost <= 0 {
+		if math.IsNaN(cost) || math.IsInf(cost, 0) || cost <= 0 {
 			util.BadRequest(c, "multi-collab channel has no priced models")
 			return
 		}
@@ -896,6 +913,10 @@ func (h *Handler) EstimateModel(c *gin.Context) {
 		return
 	}
 	cost := h.models.EstimateCost(m, req.Params, 0, 0)
+	if math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
+		util.BadRequest(c, "模型计费金额无效，请检查价格与参数配置")
+		return
+	}
 	util.OK(c, map[string]float64{"estimated_cost": cost})
 }
 
@@ -2294,6 +2315,10 @@ func (h *Handler) CreateTask(c *gin.Context) {
 	}
 	if input.Params == nil {
 		input.Params = map[string]interface{}{}
+	}
+	if portraitID := strings.TrimSpace(stringAny(input.Params["portrait_asset_id"])); portraitID != "" && !h.assets.OwnsSeedancePortraitAsset(c.Request.Context(), c.GetInt64("user_id"), portraitID) {
+		util.Forbidden(c, "该真人素材不属于当前账号，请从真人素材库选择")
+		return
 	}
 	if !h.enforceContentSafety(c, c.GetInt64("user_id"), "task", input) {
 		return
@@ -4868,8 +4893,18 @@ func (h *Handler) openAPIImageEditBody(c *gin.Context) (map[string]interface{}, 
 		openAPIError(c, http.StatusInternalServerError, "storage_unavailable", "对象存储未启用")
 		return nil, false
 	}
+	if err := limitMultipartRequest(c, 20*(20<<20)); err != nil {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "上传请求过大，参考图最多 20 张，每张不能超过 20MB")
+		return nil, false
+	}
+	defer removeMultipartFiles(c)
 	form, err := c.MultipartForm()
 	if err != nil {
+		var sizeErr *http.MaxBytesError
+		if errors.As(err, &sizeErr) {
+			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "上传请求过大，参考图最多 20 张，每张不能超过 20MB")
+			return nil, false
+		}
 		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "请使用 multipart/form-data 上传参考图")
 		return nil, false
 	}
@@ -6694,7 +6729,7 @@ func mergeConfigValues(current, incoming map[string]interface{}) map[string]inte
 
 func isSensitiveConfigKeyForMerge(key string) bool {
 	key = strings.ToLower(key)
-	return strings.Contains(key, "api_key") || strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "password")
+	return strings.Contains(key, "api_key") || strings.Contains(key, "access_key") || strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "password")
 }
 
 func validateCustomerServiceConfig(req map[string]interface{}) string {
@@ -6981,8 +7016,18 @@ func (h *Handler) Upload(c *gin.Context) {
 		util.InternalError(c, "对象存储未启用")
 		return
 	}
+	if err := limitMultipartRequest(c, 10<<20); err != nil {
+		util.BadRequest(c, "文件不能超过 10MB")
+		return
+	}
+	defer removeMultipartFiles(c)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		var sizeErr *http.MaxBytesError
+		if errors.As(err, &sizeErr) {
+			util.BadRequest(c, "文件不能超过 10MB")
+			return
+		}
 		util.BadRequest(c, "请选择文件")
 		return
 	}
@@ -7334,8 +7379,18 @@ func (h *Handler) UploadAsset(c *gin.Context) {
 		util.InternalError(c, "对象存储未启用")
 		return
 	}
+	if err := limitMultipartRequest(c, 20<<20); err != nil {
+		util.BadRequest(c, "单文件不能超过 20MB")
+		return
+	}
+	defer removeMultipartFiles(c)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		var sizeErr *http.MaxBytesError
+		if errors.As(err, &sizeErr) {
+			util.BadRequest(c, "单文件不能超过 20MB")
+			return
+		}
 		util.BadRequest(c, "请选择文件")
 		return
 	}

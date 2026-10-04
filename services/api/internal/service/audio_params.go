@@ -26,7 +26,7 @@ func BuildUpstreamAudioPayload(model *ModelFull, params map[string]interface{}) 
 		setPayloadValue(out, mappedUpstreamKey(upCfg, "input", "input"), text)
 	}
 	for k, v := range model.NewAPIExtraParams {
-		if k == "connection" {
+		if k == "connection" || strings.HasPrefix(k, "_") {
 			continue
 		}
 		out[k] = v
@@ -37,10 +37,13 @@ func BuildUpstreamAudioPayload(model *ModelFull, params map[string]interface{}) 
 		}
 	}
 	include := upCfg.Include
-	if len(include) == 0 {
+	if len(include) == 0 && !(strings.EqualFold(upCfg.Adapter, "native_media") && upCfg.IncludeSet) {
 		include = defaultUpstreamInclude(params)
 	}
 	for _, key := range include {
+		if key == "connection" || strings.HasPrefix(key, "_") {
+			continue
+		}
 		val, ok := params[key]
 		if !ok || val == nil {
 			continue

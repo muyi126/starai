@@ -86,6 +86,14 @@ function updateStoredUserLocale(code: string) {
   }
 }
 
+function storedLocale() {
+  try { return localStorage.getItem("site_locale") || ""; } catch { return ""; }
+}
+
+function storeLocale(code: string) {
+  try { localStorage.setItem("site_locale", code); } catch { /* storage may be disabled */ }
+}
+
 function normalizeTranslationOverrides(items?: UITranslationOverride[]) {
   const result: Record<string, Record<string, string>> = {};
   if (!Array.isArray(items)) return result;
@@ -119,37 +127,42 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
 
   const activateLocale = useCallback((next: string, onActivated?: () => void) => {
     const request = ++localeRequestRef.current;
-    const overrides = next === "zh-CN"
-      ? Promise.resolve([] as UITranslationOverride[])
-      : apiCached<UITranslationOverride[]>(`/api/ui-translations?locale=${encodeURIComponent(next)}`, 60_000, false).catch(() => []);
-    void Promise.all([loadLocaleDictionaries(next), overrides])
-      .then(([, items]) => {
+    // Custom overrides enhance an already usable dictionary; a slow API must
+    // not hold the selected language or its request headers hostage.
+    if (next !== "zh-CN") {
+      void apiCached<UITranslationOverride[]>(`/api/ui-translations?locale=${encodeURIComponent(next)}`, 60_000, false)
+        .then((items) => {
+          if (request !== localeRequestRef.current) return;
+          const currentOverrides = normalizeTranslationOverrides(items)[next] || {};
+          setOverrides((current) => ({ ...current, [next]: currentOverrides }));
+        })
+        .catch(() => { /* keep existing overrides on a transient API failure */ });
+    }
+    void loadLocaleDictionaries(next)
+      .then(() => {
         if (request !== localeRequestRef.current) return;
-        setOverrides((current) => ({ ...current, ...normalizeTranslationOverrides(items) }));
-        localStorage.setItem("site_locale", next);
+        storeLocale(next);
+        document.documentElement.lang = next;
         setLocaleState(next);
         onActivated?.();
       })
-      .catch(() => {
-        if (request === localeRequestRef.current) {
-          localStorage.setItem("site_locale", "zh-CN");
-          setLocaleState("zh-CN");
-        }
-      });
+      .catch(() => { /* preserve the previous usable locale if a chunk fails */ });
   }, []);
 
   useEffect(() => {
-    hydrate();
+    try { hydrate(); } catch { /* browser storage may be disabled */ }
   }, [hydrate]);
 
   useEffect(() => {
     let alive = true;
+    const preferred = storedLocale() || useAuthStore.getState().user?.locale || "";
+    if (!selectedLocaleRef.current && isSupported(preferred)) activateLocale(preferred);
     apiCached<PublicConfig>("/api/system-configs/public", 60_000, false)
       .then((cfg) => {
         if (!alive) return;
         const next = normalizeUILanguages(cfg?.ui_languages);
         setLanguages(next);
-        const stored = localStorage.getItem("site_locale") || "";
+        const stored = storedLocale();
         if (selectedLocaleRef.current && next.some((item) => item.code === selectedLocaleRef.current)) return;
         const userLocale = useAuthStore.getState().user?.locale || "";
         const target = matchLocale([stored, userLocale, cfg?.default_locale || "", navigator.language], next);
@@ -159,9 +172,8 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
         if (!alive) return;
         const next = normalizeUILanguages();
         setLanguages(next);
-        setOverrides({});
         if (selectedLocaleRef.current) return;
-        const target = matchLocale([localStorage.getItem("site_locale") || "", useAuthStore.getState().user?.locale || "", navigator.language], next);
+        const target = matchLocale([storedLocale(), useAuthStore.getState().user?.locale || "", navigator.language], next);
         activateLocale(target);
       });
     return () => {
@@ -202,8 +214,9 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
       const fallbackEn = rawEnglish;
       const overrideZh = usableTranslation(overrides["zh-CN"]?.[key as string]);
       const fallbackZh = usableTranslation(dictionaries["zh-CN"]?.[key as TranslationKey]);
-      const sourceFallback = locale !== "zh-CN" ? translateBuiltinSource(String(key), locale, dictionaries, sourceTranslations) : "";
-      return interpolate(String(overrideCurrent || keyCurrent || current || sourceFallback || overrideEn || fallbackEn || overrideZh || fallbackZh || key), vars);
+      const own = overrideCurrent || keyCurrent || current;
+      const sourceFallback = !own && locale !== "zh-CN" ? translateBuiltinSource(String(key), locale, dictionaries, sourceTranslations) : "";
+      return interpolate(String(own || sourceFallback || overrideEn || fallbackEn || overrideZh || fallbackZh || key), vars);
     },
     [locale, overrides]
   );

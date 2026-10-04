@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -207,6 +208,11 @@ func (s *TaskService) CreateCompose(ctx context.Context, userID int64, input Cre
 }
 
 func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTaskInput) (*TaskDTO, error) {
+	for key := range input.Params {
+		if isInternalTaskBillingParam(key) {
+			return nil, fmt.Errorf("不支持的任务参数：%s", key)
+		}
+	}
 	model, err := s.models.GetFullByCode(ctx, input.ModelCode)
 	if err != nil {
 		return nil, err
@@ -220,16 +226,8 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 	} else if model.RequestMode == "audio" {
 		taskType = "audio"
 	}
-	params := make(map[string]interface{})
-	for k, v := range model.DefaultParams {
-		params[k] = v
-	}
-	for k, v := range input.Params {
-		if k == "_billing_label" {
-			continue
-		}
-		params[k] = v
-	}
+	params := MergeMediaTaskParams(model.DefaultParams, input.Params)
+	delete(params, "_billing_label")
 	if label := strings.TrimSpace(input.BillingLabel); label != "" {
 		params["_billing_label"] = label
 	}
@@ -237,21 +235,15 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 		params["user_prompt"] = input.Prompt
 	}
 	params["prompt"] = input.Prompt
-	if taskType == "image" {
-		if err := validateImageTaskParams(model, params); err != nil {
-			return nil, err
-		}
-	} else if taskType == "video" {
-		if err := ValidateVideoParams(model, params); err != nil {
-			return nil, err
-		}
-	} else if taskType == "audio" {
-		if err := validateAudioTaskParams(model, params); err != nil {
-			return nil, err
-		}
+	if err := NormalizeMediaTaskParams(model, params); err != nil {
+		return nil, err
 	}
+	params["_price_rule_snapshot"] = copyMap(model.PriceRule)
 
 	estimated := s.models.EstimateCost(model, params, 0, 0)
+	if math.IsNaN(estimated) || math.IsInf(estimated, 0) || estimated < 0 {
+		return nil, errors.New("模型费用配置无效")
+	}
 	taskNo := util.NewTaskNo()
 
 	inputJSON, _ := json.Marshal(params)
@@ -290,6 +282,18 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 		TaskNo: taskNo, Type: taskType, Status: "pending", Input: inputMap,
 		EstimatedCost: estimated, CreatedAt: now,
 	}, nil
+}
+
+func isInternalTaskBillingParam(key string) bool {
+	if strings.HasPrefix(key, "_actual_") || strings.HasPrefix(key, "_estimated_") {
+		return true
+	}
+	switch key {
+	case "_skip_billing", "_workflow_project", "_product_refine", "_billing_reservation", "_execution_budget", "_price_rule_snapshot", "_billing_item_count", "estimated_input_tokens", "estimated_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *TaskService) createBalanceFailedTask(ctx context.Context, userID, modelID int64, taskType, taskNo string, inputJSON []byte, estimated float64) (*TaskDTO, error) {
@@ -670,7 +674,20 @@ func (s *TaskService) Retry(ctx context.Context, taskNo string) error {
 	if err != nil {
 		return err
 	}
+	delete(params, "_price_rule_snapshot")
+	// Persisted workflow controls are trusted; retry validates media parameters only.
+	if err := normalizeMediaParams(model, params); err != nil {
+		return err
+	}
+	params["_price_rule_snapshot"] = copyMap(model.PriceRule)
+	input, err = json.Marshal(params)
+	if err != nil {
+		return err
+	}
 	estimated := s.models.EstimateCost(model, params, 0, 0)
+	if math.IsNaN(estimated) || math.IsInf(estimated, 0) || estimated < 0 {
+		return errors.New("模型费用配置无效")
+	}
 	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "task", taskNo, func(tx pgx.Tx) error {
 		var lockedStatus string
 		if err := tx.QueryRow(ctx, `SELECT status FROM tasks WHERE task_no=$1 FOR UPDATE`, taskNo).Scan(&lockedStatus); err != nil {
@@ -679,7 +696,7 @@ func (s *TaskService) Retry(ctx context.Context, taskNo string) error {
 		if lockedStatus != "failed" {
 			return errors.New("仅失败任务可重试")
 		}
-		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='pending', estimated_cost=$1, actual_cost=0, error_code=NULL, error_message=NULL, finished_at=NULL, retry_count=retry_count+1, updated_at=now() WHERE task_no=$2 AND status='failed'`, estimated, taskNo)
+		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='pending', estimated_cost=$1, actual_cost=0, error_code=NULL, error_message=NULL, finished_at=NULL, retry_count=retry_count+1, input=$3, updated_at=now() WHERE task_no=$2 AND status='failed'`, estimated, taskNo, input)
 		if err != nil {
 			return err
 		}

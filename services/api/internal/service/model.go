@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,6 +152,11 @@ func (s *ModelService) GetFullByCode(ctx context.Context, code string) (*ModelFu
 	m.RequestMode = normalizeCustomMediaRequestMode(m.RequestMode, m.Category)
 	json.Unmarshal(price, &m.PriceRule)
 	json.Unmarshal(runtime, &m.RuntimeRule)
+	if m.RequestMode == "images" || m.RequestMode == "video" || m.RequestMode == "audio" {
+		if err := validateModelPriceRule(m.PriceRule); err != nil {
+			return nil, fmt.Errorf("模型计费配置无效: %w", err)
+		}
+	}
 	return &m, nil
 }
 
@@ -323,10 +329,13 @@ func (s *ModelService) ResolveTaskModel(ctx context.Context, identifier string, 
 }
 
 func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interface{}, promptTokens, outputTokens int) float64 {
-	billingType, _ := model.PriceRule["billing_type"].(string)
+	billingType := strings.ToLower(strings.TrimSpace(stringValue(model.PriceRule["billing_type"])))
 	switch billingType {
 	case "per_image":
 		unitPrice := imageTierPrice(model.PriceRule, params, "unit_price_by_size", "unit_price")
+		if actual, exists := actualBillingCount(params, "_actual_output_image_count"); exists {
+			return unitPrice * actual
+		}
 		n := floatValue(params["n"])
 		if n <= 0 {
 			n = floatValue(params["count"])
@@ -343,8 +352,8 @@ func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interfac
 	case "per_second":
 		unitPrice := floatValue(model.PriceRule["unit_price"])
 		duration := parseDurationSeconds(params)
-		if actual := floatValue(params["_actual_output_seconds"]); actual > 0 {
-			duration = actual
+		if actual, exists := actualOutputSeconds(params); exists {
+			return unitPrice * actual
 		}
 		return unitPrice * duration * billingItemCount(params)
 	case "dynamic":
@@ -354,15 +363,23 @@ func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interfac
 	}
 }
 
+func actualBillingCount(params map[string]interface{}, key string) (float64, bool) {
+	value, exists := params[key]
+	if !exists {
+		return 0, false
+	}
+	count, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(value)), 64)
+	return count, err == nil && count >= 0 && count == math.Trunc(count) && !math.IsNaN(count) && !math.IsInf(count, 0)
+}
+
 func (s *ModelService) EstimateCostWithTokenDetails(model *ModelFull, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
-	if stringValue(model.PriceRule["billing_type"]) != "per_token" {
+	if strings.ToLower(strings.TrimSpace(stringValue(model.PriceRule["billing_type"]))) != "per_token" {
 		return s.EstimateCost(model, params, promptTokens, outputTokens)
 	}
-	if promptTokens <= 0 && outputTokens <= 0 {
-		promptTokens, outputTokens = estimatedTokenCounts(model.PriceRule, params, promptTokens, outputTokens)
-	} else if promptTokens <= 0 {
-		promptTokens, _ = estimatedTokenCounts(model.PriceRule, params, promptTokens, 1)
+	if promptTokens > 0 || outputTokens > 0 || cacheReadTokens > 0 || cacheWriteTokens > 0 {
+		return tokenCostFromRule(model.PriceRule, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens)
 	}
+	promptTokens, outputTokens = estimatedTokenCounts(model.PriceRule, params, promptTokens, outputTokens)
 	return tokenCostFromRule(model.PriceRule, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens) * modelTokenItemCount(model, params)
 }
 
@@ -397,14 +414,8 @@ func tokenCostFromRule(rule map[string]interface{}, promptTokens, outputTokens, 
 	if cacheWriteTokens < 0 {
 		cacheWriteTokens = 0
 	}
-	if cacheReadTokens+cacheWriteTokens > promptTokens {
-		overflow := cacheReadTokens + cacheWriteTokens - promptTokens
-		if cacheWriteTokens >= overflow {
-			cacheWriteTokens -= overflow
-		} else {
-			cacheReadTokens = promptTokens - cacheWriteTokens
-		}
-	}
+	cacheReadTokens = min(cacheReadTokens, promptTokens)
+	cacheWriteTokens = min(cacheWriteTokens, promptTokens-cacheReadTokens)
 	uncachedInput := promptTokens - cacheReadTokens - cacheWriteTokens
 	inputPrice := perTokenPrice(rule, "input_price")
 	outputPrice := perTokenPrice(rule, "output_price")
@@ -526,7 +537,7 @@ func estimateMiniMaxH3Cost(rule map[string]interface{}, params map[string]interf
 	}
 
 	outputSeconds := parseDurationSeconds(params)
-	if actual := floatValue(params["_actual_output_seconds"]); actual > 0 {
+	if actual, exists := actualOutputSeconds(params); exists {
 		outputSeconds = actual
 	}
 	inputMaterialsBillable := true
@@ -623,17 +634,22 @@ func estimateSeedance2TokenCost(rule map[string]interface{}, params map[string]i
 		return floatValue(rule["fallback_cost"])
 	}
 
-	tokenUsage := floatValue(params["_actual_video_tokens"])
-	if tokenUsage <= 0 {
+	tokenUsage, hasActualTokens := actualBillingCount(params, "_actual_video_tokens")
+	if !hasActualTokens {
 		outputDuration := parseDurationSeconds(params)
+		if actual, exists := actualOutputSeconds(params); exists {
+			outputDuration = actual
+		}
 		tokenUsage = outputDuration * tokensPerSecond
 		if hasVideoInput {
 			inputDuration := floatValue(params["reference_video_duration_seconds"])
-			if inputDuration <= 0 {
+			if actual, exists := actualUsageSeconds(params, "_actual_input_seconds"); exists {
+				inputDuration = actual
+			} else if inputDuration <= 0 {
 				inputDuration = floatValue(rule["default_input_video_seconds"])
-			}
-			if inputDuration <= 0 {
-				inputDuration = 4
+				if inputDuration <= 0 {
+					inputDuration = 4
+				}
 			}
 			tokenUsage = (outputDuration + inputDuration) * tokensPerSecond
 			minMultiplier := floatValue(rule["video_min_token_multiplier"])
@@ -1363,7 +1379,7 @@ func defaultAPIDocRequestExample(doc *APIDocDTO) map[string]interface{} {
 		})
 		videoRule, _ := doc.RuntimeRule["video"].(map[string]interface{})
 		switch strings.TrimSpace(fmt.Sprint(videoRule["upload_profile"])) {
-		case "veo_frame_pair":
+		case "veo_frame_pair", "first_frame":
 			example["first_frame"] = "https://your-public-url.example/first-frame.png"
 		case "aliyun_happyhorse_first_frame":
 			example["first_frame"] = "https://your-public-url.example/first-frame.png"
@@ -1639,15 +1655,27 @@ func validateModelPriceRule(rule map[string]interface{}) error {
 	if !allowed[billingType] {
 		return fmt.Errorf("不支持的计费类型：%s", billingType)
 	}
-	for _, key := range []string{"unit_price", "input_price", "output_price", "cache_read_price", "cache_write_price", "input_price_per_m", "output_price_per_m", "cache_read_price_per_m", "cache_write_price_per_m", "surcharge_per_m", "fallback_cost"} {
-		if floatValue(rule[key]) < 0 {
-			return fmt.Errorf("计费字段 %s 不能为负数", key)
+	rule["billing_type"] = billingType
+	for _, key := range []string{"unit_price", "input_price", "output_price", "cache_read_price", "cache_write_price", "input_price_per_m", "output_price_per_m", "cache_read_price_per_m", "cache_write_price_per_m", "surcharge_per_m", "fallback_cost", "estimated_input_tokens", "estimated_output_tokens", "excess_image_price", "points_per_cny", "platform_multiplier", "default_input_video_seconds", "free_reference_images", "video_min_token_multiplier"} {
+		if err := normalizePriceNumber(rule, key); err != nil {
+			return err
 		}
 	}
 	if prices, ok := rule["unit_price_by_size"].(map[string]interface{}); ok {
-		for tier, price := range prices {
-			if floatValue(price) < 0 {
-				return fmt.Errorf("图片档位 %s 的单价不能为负数", tier)
+		for tier := range prices {
+			if err := normalizePriceNumber(prices, tier); err != nil {
+				return err
+			}
+		}
+	}
+	for _, key := range []string{"rates_per_second", "input_video_rates_per_second", "tokens_per_second", "rates_per_m_tokens"} {
+		if values, exists := rule[key]; exists {
+			prices, ok := values.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("计费字段 %s 必须是价格映射", key)
+			}
+			if err := normalizePriceMap(prices); err != nil {
+				return err
 			}
 		}
 	}
@@ -1670,6 +1698,51 @@ func validateModelPriceRule(rule map[string]interface{}) error {
 		strategy := strings.ToLower(strings.TrimSpace(stringValue(rule["strategy"])))
 		if strategy != "seedance_2_tokens" && strategy != "minimax_h3_seconds" && floatValue(rule["fallback_cost"]) <= 0 {
 			return errors.New("动态计费策略无效，且未配置 fallback_cost")
+		}
+	}
+	return nil
+}
+
+func normalizePriceNumber(rule map[string]interface{}, key string) error {
+	value, exists := rule[key]
+	if !exists {
+		return nil
+	}
+	if text, ok := value.(string); ok {
+		var err error
+		value, err = strconv.ParseFloat(strings.TrimSpace(text), 64)
+		if err != nil {
+			return fmt.Errorf("计费字段 %s 必须是有限的非负数", key)
+		}
+	}
+	if number, ok := value.(json.Number); ok {
+		var err error
+		value, err = number.Float64()
+		if err != nil {
+			return fmt.Errorf("计费字段 %s 必须是有限的非负数", key)
+		}
+	}
+	switch value.(type) {
+	case float64, float32, int, int64, json.Number:
+	default:
+		return fmt.Errorf("计费字段 %s 必须是有限的非负数", key)
+	}
+	number := floatValue(value)
+	if number < 0 || math.IsNaN(number) || math.IsInf(number, 0) {
+		return fmt.Errorf("计费字段 %s 必须是有限的非负数", key)
+	}
+	rule[key] = number
+	return nil
+}
+
+func normalizePriceMap(prices map[string]interface{}) error {
+	for key, value := range prices {
+		if nested, ok := value.(map[string]interface{}); ok {
+			if err := normalizePriceMap(nested); err != nil {
+				return err
+			}
+		} else if err := normalizePriceNumber(prices, key); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1855,6 +1928,7 @@ func validateModelConnection(input CreateModelInput) error {
 	}
 
 	authType, _ := conn["auth_type"].(string)
+	authType = strings.ToLower(strings.TrimSpace(authType))
 	if authType == "" {
 		authType = "bearer"
 	}
@@ -1862,13 +1936,15 @@ func validateModelConnection(input CreateModelInput) error {
 	// Validate auth_type
 	allowedAuthTypes := map[string]bool{
 		"bearer":         true,
+		"token":          true,
 		"api_key_header": true,
 		"none":           true,
 		"env":            true,
 	}
 	if !allowedAuthTypes[authType] {
-		return fmt.Errorf("不支持的 auth_type: %s，允许的值：bearer, api_key_header, none, env", authType)
+		return fmt.Errorf("不支持的 auth_type: %s，允许的值：bearer, token, api_key_header, none, env", authType)
 	}
+	conn["auth_type"] = authType
 
 	if authType != "none" {
 		apiKey, _ := conn["api_key"].(string)

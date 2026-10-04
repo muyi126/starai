@@ -332,6 +332,10 @@ func applyAuthHeaders(req *http.Request, cfg RequestConfig) {
 		req.Header.Set(k, v)
 	}
 	switch cfg.AuthType {
+	case "token":
+		if cfg.APIKey != "" {
+			req.Header.Set("Authorization", "Token "+cfg.APIKey)
+		}
 	case "none":
 		return
 	case "api_key_header":

@@ -21,7 +21,7 @@ func TestDocumentImageRoutingAndCountRecovery(t *testing.T) {
 			t.Fatalf("non-executable request routed to images: %s", text)
 		}
 	}
-	for text, count := range map[string]int{"一页": 1, "十一页": 11, "生成1张": 1, "生成两张": 2, "制作16张": 16, "这份20页PDF生成1张": 1, "做一张含4个卡片的教辅图": 1, "把原来的十一页缩减到三页": 3, "从二十五页压缩到十页": 10, "改成5页": 5, "改成五页": 5, "改成7页": 7, "改成七页": 7, "改成柒页": 7, "调整为拾贰页": 12} {
+	for text, count := range map[string]int{"一页": 1, "十一页": 11, "生成1张": 1, "生成两张": 2, "制作16张": 16, "这份20页PDF生成1张": 1, "做一张含4个卡片的教辅图": 1, "把原来的十一页缩减到三页": 3, "从二十五页压缩到十页": 10, "改成5页": 5, "改成五页": 5, "改成7页": 7, "改成七页": 7, "改成柒页": 7, "还是柒页吧": 7, "七张太多，五张就好": 5, "调整为拾贰页": 12} {
 		if got := creativeAgentRequestedImageCount(text); got != count {
 			t.Fatalf("%s: %d", text, got)
 		}

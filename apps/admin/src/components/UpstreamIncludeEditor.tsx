@@ -167,7 +167,7 @@ export function UpstreamIncludeEditor({
             value={customKey}
             onChange={(e) => setCustomKey(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 addCustom();
               }

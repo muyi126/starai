@@ -103,11 +103,20 @@ func normalizeVideoSchemaParamTypes(inputSchema map[string]interface{}, params m
 	durationProp, _ := props["duration"].(map[string]interface{})
 	enumValues, _ := durationProp["enum"].([]interface{})
 	current, exists := params["duration"]
-	if !exists || len(enumValues) == 0 || enumContains(enumValues, current) {
+	if !exists || enumContains(enumValues, current) {
 		return
 	}
 	currentSeconds, ok := schemaDurationSeconds(current)
 	if !ok {
+		return
+	}
+	if len(enumValues) == 0 {
+		switch stringValue(durationProp["type"]) {
+		case "integer", "number":
+			params["duration"] = currentSeconds
+		case "string":
+			params["duration"] = fmt.Sprint(current)
+		}
 		return
 	}
 	for _, candidate := range enumValues {
@@ -138,6 +147,9 @@ func BuildUpstreamVideoPayload(model *ModelFull, params map[string]interface{}) 
 		setPayloadValue(out, mappedUpstreamKey(upCfg, "prompt", "prompt"), prompt)
 	}
 	for k, v := range model.NewAPIExtraParams {
+		if k == "connection" || strings.HasPrefix(k, "_") {
+			continue
+		}
 		out[k] = v
 	}
 	if upCfg.Static != nil {
@@ -146,10 +158,13 @@ func BuildUpstreamVideoPayload(model *ModelFull, params map[string]interface{}) 
 		}
 	}
 	include := upCfg.Include
-	if len(include) == 0 {
+	if len(include) == 0 && !(strings.EqualFold(upCfg.Adapter, "native_media") && upCfg.IncludeSet) {
 		include = defaultUpstreamInclude(params)
 	}
 	for _, key := range include {
+		if key == "connection" || strings.HasPrefix(key, "_") {
+			continue
+		}
 		val, ok := params[key]
 		if !ok || val == nil {
 			continue
@@ -169,14 +184,14 @@ func BuildUpstreamVideoPayload(model *ModelFull, params map[string]interface{}) 
 }
 
 func parseDurationSeconds(params map[string]interface{}) float64 {
-	for _, key := range []string{"duration", "duration_sec", "seconds"} {
+	for _, key := range []string{"duration", "duration_seconds", "duration_sec", "seconds"} {
 		raw, ok := params[key]
 		if !ok {
 			continue
 		}
 		switch v := raw.(type) {
 		case float64:
-			if v > 0 {
+			if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
 				return v
 			}
 		case int:
@@ -185,12 +200,25 @@ func parseDurationSeconds(params map[string]interface{}) float64 {
 			}
 		case string:
 			s := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(v, "s"), "S"))
-			if n, err := strconv.ParseFloat(s, 64); err == nil && n > 0 {
+			if n, err := strconv.ParseFloat(s, 64); err == nil && n > 0 && !math.IsNaN(n) && !math.IsInf(n, 0) {
 				return n
 			}
 		}
 	}
 	return 5
+}
+
+func actualOutputSeconds(params map[string]interface{}) (float64, bool) {
+	return actualUsageSeconds(params, "_actual_output_seconds")
+}
+
+func actualUsageSeconds(params map[string]interface{}, key string) (float64, bool) {
+	value, exists := params[key]
+	if !exists {
+		return 0, false
+	}
+	seconds, valid := schemaDurationSeconds(value)
+	return seconds, valid && seconds >= 0 && !math.IsNaN(seconds) && !math.IsInf(seconds, 0)
 }
 
 type videoRuntimeConfig struct {
@@ -212,10 +240,11 @@ type videoRuntimeConfig struct {
 }
 
 type upstreamConfig struct {
-	Adapter string
-	Include []string
-	Map     map[string]string
-	Static  map[string]interface{}
+	Adapter    string
+	IncludeSet bool
+	Include    []string
+	Map        map[string]string
+	Static     map[string]interface{}
 }
 
 func parseVideoRuntimeConfig(runtimeRule map[string]interface{}) videoRuntimeConfig {
@@ -308,6 +337,7 @@ func parseUpstreamConfig(runtimeRule map[string]interface{}) upstreamConfig {
 	}
 	cfg.Adapter = strings.TrimSpace(fmt.Sprint(up["adapter"]))
 	if arr, ok := up["include"].([]interface{}); ok {
+		cfg.IncludeSet = true
 		for _, item := range arr {
 			if s, ok := item.(string); ok {
 				cfg.Include = append(cfg.Include, s)
@@ -381,6 +411,13 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 	switch cfg.UploadProfile {
 	case "none":
 		return nil
+	case "first_frame":
+		if firstCount > 1 {
+			return errors.New("首帧最多只能上传 1 张图片")
+		}
+		if lastCount > 0 || refCount > 0 {
+			return errors.New("首帧模板不支持尾帧或额外参考图")
+		}
 	case "veo_reference":
 		mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params[cfg.ModeParam])))
 		switch mode {
@@ -639,16 +676,17 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 
 func validateSchemaParams(inputSchema map[string]interface{}, params map[string]interface{}) error {
 	props, _ := inputSchema["properties"].(map[string]interface{})
-	if props == nil {
-		return nil
-	}
 	required, _ := inputSchema["required"].([]interface{})
 	for _, r := range required {
 		key, _ := r.(string)
 		if key == "" {
 			continue
 		}
-		if _, ok := params[key]; !ok {
+		value, ok := params[key]
+		if !ok || value == nil {
+			return fmt.Errorf("缺少必填参数: %s", key)
+		}
+		if text, isText := value.(string); isText && strings.TrimSpace(text) == "" {
 			return fmt.Errorf("缺少必填参数: %s", key)
 		}
 	}
@@ -660,6 +698,9 @@ func validateSchemaParams(inputSchema map[string]interface{}, params map[string]
 		val, exists := params[key]
 		if !exists {
 			continue
+		}
+		if !validSchemaValue(prop, val) {
+			return fmt.Errorf("参数 %s 的类型或范围无效", key)
 		}
 		if enum, ok := prop["enum"].([]interface{}); ok && len(enum) > 0 {
 			if enumContains(enum, val) {
@@ -674,8 +715,198 @@ func validateSchemaParams(inputSchema map[string]interface{}, params map[string]
 	return nil
 }
 
+// MergeMediaTaskParams lets a requested alias replace its default aliases.
+func MergeMediaTaskParams(defaults, requested map[string]interface{}) map[string]interface{} {
+	params := copyMap(defaults)
+	for _, aliases := range [][]string{{"n", "count"}, {"duration", "duration_seconds", "duration_sec", "seconds"}} {
+		for _, key := range aliases {
+			if _, requestedAlias := requested[key]; requestedAlias {
+				for _, alias := range aliases {
+					delete(params, alias)
+				}
+				break
+			}
+		}
+	}
+	for key, value := range requested {
+		params[key] = value
+	}
+	return params
+}
+
+func NormalizeMediaTaskParams(model *ModelFull, params map[string]interface{}) error {
+	for key := range params {
+		if isInternalTaskBillingParam(key) {
+			return fmt.Errorf("不支持的任务参数：%s", key)
+		}
+	}
+	return normalizeMediaParams(model, params)
+}
+
+// Quotes validate the same values without requiring generation text or assets.
+func NormalizeMediaEstimateParams(model *ModelFull, params map[string]interface{}) error {
+	for key := range params {
+		if isInternalTaskBillingParam(key) {
+			return fmt.Errorf("不支持的任务参数：%s", key)
+		}
+	}
+	if err := normalizeMediaNumbers(model, params); err != nil {
+		return err
+	}
+	if model.RequestMode == "video" {
+		normalizeVideoSchemaParamTypes(model.InputSchema, params)
+	}
+	schema := copyMap(model.InputSchema)
+	delete(schema, "required")
+	return validateSchemaParams(schema, params)
+}
+
+func normalizeMediaNumbers(model *ModelFull, params map[string]interface{}) error {
+	count := 0
+	for _, key := range []string{"n", "count"} {
+		if raw, exists := params[key]; exists {
+			n, valid := exactPositiveInt(raw)
+			if !valid || (model.RequestMode == "images" && n > 50) {
+				return fmt.Errorf("参数 %s 必须是有效的正整数", key)
+			}
+			if count > 0 && count != n {
+				return errors.New("参数 n 与 count 必须一致")
+			}
+			count = n
+		}
+	}
+	if count > 0 {
+		if model.RequestMode == "audio" && count != 1 {
+			return errors.New("音频任务仅支持生成 1 个结果，请分别提交多个任务")
+		}
+		section := "image"
+		if model.RequestMode == "video" || model.RequestMode == "audio" {
+			section = model.RequestMode
+		}
+		config, _ := model.RuntimeRule[section].(map[string]interface{})
+		maximum := 50
+		if raw, exists := config["count_max"]; exists {
+			configured, valid := exactPositiveInt(raw)
+			if !valid {
+				return errors.New("模型生成数量上限配置无效")
+			}
+			maximum = min(maximum, configured)
+		}
+		if count > maximum {
+			return fmt.Errorf("模型单次最多支持生成 %d 个结果", maximum)
+		}
+		if custom, configured := config["count_allow_custom"].(bool); configured && !custom {
+			options, _ := config["count_options"].([]interface{})
+			if len(options) > 0 && !enumContains(options, count) {
+				return errors.New("生成数量不在模型支持范围内")
+			}
+		}
+		params["n"], params["count"] = count, count
+	}
+	duration := 0.0
+	for _, key := range []string{"duration", "duration_seconds", "duration_sec", "seconds"} {
+		if raw, exists := params[key]; exists {
+			seconds, valid := schemaDurationSeconds(raw)
+			if !valid || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+				return fmt.Errorf("参数 %s 必须是有效的正时长", key)
+			}
+			if duration > 0 && duration != seconds {
+				return errors.New("视频或音频时长参数必须一致")
+			}
+			duration = seconds
+		}
+	}
+	if _, exists := params["duration"]; !exists && duration > 0 {
+		params["duration"] = duration
+	}
+	normalizeVideoSchemaParamTypes(model.InputSchema, params)
+	return nil
+}
+
+func normalizeMediaParams(model *ModelFull, params map[string]interface{}) error {
+	if err := normalizeMediaNumbers(model, params); err != nil {
+		return err
+	}
+	switch model.RequestMode {
+	case "images":
+		return validateImageTaskParams(model, params)
+	case "video":
+		return ValidateVideoParams(model, params)
+	case "audio":
+		return validateAudioTaskParams(model, params)
+	default:
+		return nil
+	}
+}
+
+func validSchemaValue(prop map[string]interface{}, value interface{}) bool {
+	kind, _ := prop["type"].(string)
+	switch kind {
+	case "integer", "number":
+		switch value.(type) {
+		case float64, float32, int, int64, json.Number:
+		default:
+			return false
+		}
+		number := floatValue(value)
+		if math.IsNaN(number) || math.IsInf(number, 0) || (kind == "integer" && number != math.Trunc(number)) {
+			return false
+		}
+		if minimum, exists := prop["minimum"]; exists && number < floatValue(minimum) {
+			return false
+		}
+		if maximum, exists := prop["maximum"]; exists && number > floatValue(maximum) {
+			return false
+		}
+		if step := floatValue(prop["multipleOf"]); step > 0 && math.Abs(number/step-math.Round(number/step)) > 1e-8 {
+			return false
+		}
+	case "string":
+		text, ok := value.(string)
+		if !ok {
+			return false
+		}
+		length := len([]rune(text))
+		if minimum, exists := prop["minLength"]; exists && length < int(floatValue(minimum)) {
+			return false
+		}
+		if maximum, exists := prop["maxLength"]; exists && length > int(floatValue(maximum)) {
+			return false
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return false
+		}
+	case "array":
+		length := 0
+		switch array := value.(type) {
+		case []interface{}:
+			length = len(array)
+		case []string:
+			length = len(array)
+		default:
+			return false
+		}
+		if minimum, exists := prop["minItems"]; exists && length < int(floatValue(minimum)) {
+			return false
+		}
+		if maximum, exists := prop["maxItems"]; exists && length > int(floatValue(maximum)) {
+			return false
+		}
+	case "object":
+		if _, ok := value.(map[string]interface{}); !ok {
+			return false
+		}
+	}
+	return value != nil
+}
+
 func validateImageTaskParams(model *ModelFull, params map[string]interface{}) error {
 	maxRefs := maxReferenceImages(model)
+	imageRule, _ := model.RuntimeRule["image"].(map[string]interface{})
+	if minimum := intFromAny(imageRule["min_reference_images"], 0); urlFieldCount(params["reference_images"]) < minimum {
+		return fmt.Errorf("至少需要 %d 张参考图", minimum)
+	}
 	if refs, ok := params["reference_images"]; ok {
 		if referenceImageCount(refs) > maxRefs {
 			return errors.New("参考图数量超过模型限制")
@@ -723,7 +954,7 @@ func validateImageTaskParams(model *ModelFull, params map[string]interface{}) er
 
 func exactPositiveInt(value interface{}) (int, bool) {
 	number, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(value)), 64)
-	if err != nil || number < 1 || number != math.Trunc(number) || number > math.MaxInt {
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) || number < 1 || number != math.Trunc(number) || number >= float64(math.MaxInt) {
 		return 0, false
 	}
 	return int(number), true
@@ -732,7 +963,7 @@ func exactPositiveInt(value interface{}) (int, bool) {
 func defaultUpstreamInclude(params map[string]interface{}) []string {
 	keys := make([]string, 0, len(params))
 	for k := range params {
-		if k == "prompt" {
+		if k == "prompt" || k == "connection" || strings.HasPrefix(k, "_") {
 			continue
 		}
 		keys = append(keys, k)
@@ -780,8 +1011,8 @@ func enumContains(enum []interface{}, val interface{}) bool {
 }
 
 func validateIntRange(prop map[string]interface{}, val interface{}) bool {
-	n := intFromAny(val, -1)
-	if n < 1 {
+	n, valid := exactPositiveInt(val)
+	if !valid {
 		return false
 	}
 	min := intFromAny(prop["minimum"], 1)

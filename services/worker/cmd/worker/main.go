@@ -331,8 +331,11 @@ routeLoop:
 			candidate, callErr := executeWorkerGenerationAttempt(ctx, pool, p, route, isVideo, isAudio, isImage, prompt)
 			latency := int(time.Since(started).Milliseconds())
 			if callErr == nil && candidate.StatusCode < 400 && len(candidate.ResultData) == 0 {
-				candidate.ResultData, candidate.UpstreamTaskID = parseUpstreamMedia(candidate.ResponseBody)
-				if len(candidate.ResultData) == 0 && candidate.UpstreamTaskID == "" {
+				if message := configuredMediaBusinessError(candidate.ResponseBody, candidate.RuntimeRule); message != "" {
+					callErr = fmt.Errorf("%s", message)
+				}
+				candidate.ResultData, candidate.UpstreamTaskID = parseUpstreamMediaWithRule(candidate.ResponseBody, candidate.RuntimeRule)
+				if callErr == nil && len(candidate.ResultData) == 0 && candidate.UpstreamTaskID == "" {
 					callErr = fmt.Errorf("upstream returned no usable result")
 				}
 			}
@@ -376,17 +379,14 @@ routeLoop:
 		_, _ = pool.Exec(ctx, `UPDATE tasks SET upstream_task_id=$1,route_id=$2,updated_at=now() WHERE task_no=$3`, upstreamID, nullableRouteID(selected.Route.ID), p.TaskNo)
 	}
 
-	usage := upstreamUsageFromBody(respBody)
+	usage := upstreamUsageFromBodyWithRule(respBody, runtimeRule)
 	if !(isImage && isVideoImageAPI(endpoint, newAPIModel)) {
-		resultData, upstreamID = parseUpstreamMedia(respBody)
+		resultData, upstreamID = parseUpstreamMediaWithRule(respBody, runtimeRule)
 		if upstreamID != "" {
 			pool.Exec(ctx, `UPDATE tasks SET upstream_task_id=$1, updated_at=now() WHERE task_no=$2`, upstreamID, p.TaskNo)
 		}
 		if len(resultData) == 0 && upstreamID != "" {
-			pollCfg := parsePollConfig(runtimeRule, endpoint)
-			if responsePollPath := upstreamPollPath(respBody, conn.BaseURL); responsePollPath != "" {
-				pollCfg.Path = responsePollPath
-			}
+			pollCfg := resolveMediaPollConfig(runtimeRule, endpoint, respBody, conn.BaseURL)
 			log.Printf("Task %s upstream async id=%s poll=%s interval=%s timeout=%s", p.TaskNo, upstreamID, pollCfg.Path, pollCfg.Interval, pollCfg.Timeout)
 			var pollUsage upstreamUsageDetails
 			resultData, pollUsage, err = pollUpstreamTask(ctx, pool, conn, pollCfg, upstreamID, p.TaskNo)
@@ -396,7 +396,7 @@ routeLoop:
 				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", err.Error())
 			}
 			if pollUsage.hasAny() {
-				usage = pollUsage
+				usage = mergeMediaUsage(usage, pollUsage)
 			}
 		}
 	}
@@ -417,16 +417,12 @@ routeLoop:
 
 	var taskID int64
 	var estimated float64
-	pool.QueryRow(ctx, `SELECT id, estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&taskID, &estimated)
-	actualCost := estimated
-	billingInput := inputWithActualUpstreamUsage(p.Input, usage)
-	if usage.hasAny() {
-		actualCost = estimateModelCostByIDWorker(ctx, pool, p.ModelID, billingInput, usage.PromptTokens, usage.OutputTokens, 0, 0)
+	if err := pool.QueryRow(ctx, `SELECT id, estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&taskID, &estimated); err != nil {
+		return fmt.Errorf("load task settlement %s: %w", p.TaskNo, err)
 	}
-	providerCost := workerRouteProviderCost(selected.Route, billingInput, usage.PromptTokens, usage.OutputTokens, 0, 0)
-	updateWorkerRouteAttemptProviderCost(ctx, pool, p.TaskNo, selected.Route.ID, providerCost)
-
 	var output, meta []byte
+	var generatedMediaSources []string
+	persistedImageCount := -1
 	workType := "image"
 	thumbnail := resultData[0].URL
 	if isVideo {
@@ -461,6 +457,7 @@ routeLoop:
 				video["upstream_content_url"] = contentURL
 			}
 			videos = append(videos, video)
+			generatedMediaSources = append(generatedMediaSources, videoURL)
 		}
 		if len(videos) == 0 {
 			return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成完成但未返回视频")
@@ -483,6 +480,7 @@ routeLoop:
 			stored, err := storeBase64MediaResult(ctx, p.TaskNo, 1, resultData[0].B64JSON, resultData[0].MimeType, "audio")
 			if err != nil {
 				log.Printf("Task %s store base64 audio failed: %v", p.TaskNo, err)
+				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成成功，但音频转存失败："+err.Error())
 			} else {
 				audioURL = stored
 			}
@@ -500,6 +498,7 @@ routeLoop:
 			audioURL = stored
 		}
 		thumbnail = audioURL
+		generatedMediaSources = append(generatedMediaSources, audioURL)
 		audioOutput := map[string]interface{}{"audio_url": audioURL, "upstream_task_id": upstreamID}
 		if timing, ok := p.Input["_speech_timing"].(map[string]interface{}); ok {
 			timed, err := finalizeTimedSpeech(ctx, p.TaskNo, audioURL, timing, stringAny(p.Input["format"]))
@@ -523,6 +522,7 @@ routeLoop:
 			if item.B64JSON != "" {
 				if stored, err := storeBase64MediaResult(ctx, p.TaskNo, idx+1, item.B64JSON, item.MimeType, "image"); err != nil {
 					log.Printf("Task %s store base64 image #%d failed: %v", p.TaskNo, idx+1, err)
+					return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成成功，但图片转存失败："+err.Error())
 				} else if stored != "" {
 					url = stored
 				}
@@ -546,9 +546,42 @@ routeLoop:
 			return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成完成但未返回图片")
 		}
 		imageURL := images[0]["url"]
+		persistedImageCount = len(images)
 		output, _ = json.Marshal(map[string]interface{}{"image_url": imageURL, "images": images, "upstream_task_id": upstreamID})
 		meta, _ = json.Marshal(map[string]interface{}{"image_url": imageURL})
 	}
+
+	if !usage.HasOutputSeconds && mediaNeedsSecondsBilling(p.Input, selected.Route.CostRule) && len(generatedMediaSources) > 0 {
+		if seconds, measureErr := measureMediaOutputSeconds(ctx, generatedMediaSources); measureErr == nil {
+			usage.OutputSeconds, usage.HasOutputSeconds = seconds, true
+		} else {
+			log.Printf("Task %s media duration unavailable, retaining estimate: %v", p.TaskNo, measureErr)
+		}
+	}
+	if mediaNeedsSecondsBilling(p.Input, selected.Route.CostRule) {
+		var data map[string]interface{}
+		if json.Unmarshal(output, &data) == nil {
+			source := "estimated"
+			if usage.HasOutputSeconds {
+				source = "actual"
+			}
+			data["billing_usage"] = map[string]interface{}{"seconds_source": source, "output_seconds": workerBillableSeconds(inputWithActualUpstreamUsage(p.Input, usage))}
+			output, _ = json.Marshal(data)
+		}
+	}
+	actualCost := estimated
+	billingInput := workerBillingParams(inputWithActualUpstreamUsage(p.Input, usage), category)
+	billingInput = workerActualOutputBillingInput(billingInput, selected.RequestCount, persistedImageCount)
+	if shouldRepriceMediaUsage(usage, billingInput) {
+		actualCost = estimateModelCostByIDWorker(ctx, pool, p.ModelID, billingInput, usage.PromptTokens, usage.OutputTokens, 0, 0)
+	}
+	actualCost = roundWorkerBillingAmount(actualCost)
+	providerCost := workerRouteProviderCost(selected.Route, billingInput, usage.PromptTokens, usage.OutputTokens, 0, 0)
+	providerCost = math.Round(providerCost*100_000_000) / 100_000_000
+	if !finiteWorkerMoney(actualCost, providerCost) {
+		return failTask(ctx, pool, p, "BILLING_AMOUNT_INVALID", "计费金额无效，请检查模型价格规则")
+	}
+	updateWorkerRouteAttemptProviderCost(ctx, pool, p.TaskNo, selected.Route.ID, providerCost)
 
 	txType, remark := "image_usage", "图片生成"
 	if isVideo {
@@ -975,6 +1008,7 @@ func updateWorkerRouteAttemptProviderCost(ctx context.Context, pool *pgxpool.Poo
 }
 
 func workerRouteProviderCost(route workerModelRoute, input map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
+	promptTokens, outputTokens = max(0, promptTokens), max(0, outputTokens)
 	typeName := strings.ToLower(strings.TrimSpace(fmt.Sprint(route.CostRule["billing_type"])))
 	value := func(key string) float64 { return floatAny(route.CostRule[key]) }
 	switch typeName {
@@ -994,12 +1028,17 @@ func workerRouteProviderCost(route workerModelRoute, input map[string]interface{
 		if cacheWriteTokens < 0 {
 			cacheWriteTokens = 0
 		}
-		if cacheReadTokens+cacheWriteTokens > promptTokens {
-			cacheReadTokens, cacheWriteTokens = 0, 0
-		}
+		cacheReadTokens = min(cacheReadTokens, promptTokens)
+		cacheWriteTokens = min(cacheWriteTokens, promptTokens-cacheReadTokens)
 		uncached := promptTokens - cacheReadTokens - cacheWriteTokens
 		return (float64(uncached)*inputCost + float64(cacheReadTokens)*cacheReadCost + float64(cacheWriteTokens)*cacheWriteCost + float64(outputTokens)*value("output_cost_per_m")) / 1_000_000
-	case "per_image", "per_request":
+	case "per_request":
+		count := 1.0
+		if actual, valid := mediaUsageTokens(input, "_actual_request_count"); valid {
+			count = actual
+		}
+		return count * value("unit_cost")
+	case "per_image":
 		count := intAny(input["n"])
 		if count <= 0 {
 			count = intAny(input["count"])
@@ -1007,19 +1046,13 @@ func workerRouteProviderCost(route workerModelRoute, input map[string]interface{
 		if count <= 0 {
 			count = 1
 		}
-		unitCost := value("unit_cost")
-		if typeName == "per_image" {
-			unitCost = workerImageTierValue(route.CostRule, input, "unit_cost_by_size", "unit_cost")
+		if actual, valid := mediaUsageTokens(input, "_actual_output_image_count"); valid {
+			count = int(actual)
 		}
+		unitCost := workerImageTierValue(route.CostRule, input, "unit_cost_by_size", "unit_cost")
 		return float64(count) * unitCost
 	case "per_second":
-		seconds := floatAny(input["_actual_output_seconds"])
-		if seconds <= 0 {
-			seconds = workerDurationSeconds(input)
-		}
-		if seconds <= 0 {
-			seconds = 1
-		}
+		seconds := workerBillableSeconds(input)
 		return seconds * value("unit_cost")
 	default:
 		return value("unit_cost")
@@ -1037,6 +1070,7 @@ type workerGenerationAttemptResult struct {
 	ResultData      []mediaItem
 	UpstreamTaskID  string
 	GenerationCount int
+	RequestCount    int
 }
 
 func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, route workerModelRoute, isVideo, isAudio, isImage bool, prompt string) (workerGenerationAttemptResult, error) {
@@ -1046,7 +1080,7 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	if _, exists := route.Connection.Headers["Idempotency-Key"]; !exists {
 		route.Connection.Headers["Idempotency-Key"] = p.TaskNo
 	}
-	result := workerGenerationAttemptResult{Route: route, RuntimeRule: route.RuntimeRule, Connection: route.Connection, Endpoint: route.Endpoint, UpstreamModel: route.UpstreamModel, GenerationCount: 1}
+	result := workerGenerationAttemptResult{Route: route, RuntimeRule: route.RuntimeRule, Connection: route.Connection, Endpoint: route.Endpoint, UpstreamModel: route.UpstreamModel, GenerationCount: 1, RequestCount: 1}
 	if requiresAliyunWorkspaceEndpoint(route.UpstreamModel) && !isAliyunWorkspaceEndpoint(route.Connection.BaseURL) {
 		return result, errors.New("阿里云百炼模型线路必须配置与模型和 API Key 同地域、带 WorkspaceId 的 HTTPS Endpoint")
 	}
@@ -1163,6 +1197,11 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	// builder. The video/audio builder intentionally strips connection (secrets),
 	// so doing this inside only one builder silently skipped custom media routes.
 	applyRequestTransform(payload, extraParams)
+	if isVideo {
+		if err := ensureVideoModel(payload, upstreamModel, p.ModelCode); err != nil {
+			return result, err
+		}
+	}
 	if isImage && isOpenAIImagesAdapter(route.RuntimeRule) {
 		if strings.HasPrefix(strings.ToLower(stringAny(payload["model"])), "gpt-image-2") {
 			delete(payload, "input_fidelity")
@@ -1174,7 +1213,7 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 			payload["mask"] = mask
 		}
 	}
-	if isVideo && !isDolaSeedanceAdapter(route.RuntimeRule) {
+	if isVideo || strings.EqualFold(stringAny(upstreamMediaConfig(route.RuntimeRule)["adapter"]), "native_media") {
 		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 	}
 	if err := normalizePayloadMedia(ctx, payload, endpoint); err != nil {
@@ -1187,6 +1226,7 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	}
 	var err error
 	if isImage && isVideoImageAPI(endpoint, upstreamModel) {
+		result.RequestCount = result.GenerationCount
 		result.ResultData, result.UpstreamTaskID, err = runBananaImageBatch(ctx, pool, route.Connection, endpoint, payload, route.RuntimeRule, p.TaskNo, result.GenerationCount)
 	} else if isImage && isOpenAIImagesAdapter(route.RuntimeRule) {
 		timeout := upstreamRequestTimeout(route.RuntimeRule, false)
@@ -1268,6 +1308,18 @@ func resolveImageRequestEndpoint(runtimeRule map[string]interface{}, endpoint, m
 		return endpoint, errors.New("当前线路未接通蒙版编辑，已停止，不能降级为整图重绘")
 	}
 	return endpoint, nil
+}
+
+func ensureVideoModel(payload map[string]interface{}, upstreamModel, modelCode string) error {
+	if strings.TrimSpace(stringAny(payload["model"])) != "" {
+		return nil
+	}
+	model := firstNonEmpty(strings.TrimSpace(upstreamModel), strings.TrimSpace(modelCode))
+	if model == "" {
+		return errors.New("视频线路未配置上游模型名称")
+	}
+	payload["model"] = model
+	return nil
 }
 
 func buildOpenAIImagesPayload(upstreamModel, modelCode, prompt string, count int, input map[string]interface{}) map[string]interface{} {
@@ -1415,7 +1467,7 @@ func isTencentTokenHubImageAPI(baseURL string) bool {
 func hasMappedMediaPayload(runtimeRule map[string]interface{}) bool {
 	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
 	mapping, _ := upstream["map"].(map[string]interface{})
-	return len(mapping) > 0
+	return len(mapping) > 0 || strings.EqualFold(stringAny(upstream["adapter"]), "native_media")
 }
 
 func buildMappedImagePayload(ctx context.Context, modelCode, upstreamModel string, runtimeRule, extraParams, input map[string]interface{}) map[string]interface{} {
@@ -1542,6 +1594,10 @@ func applyConnectionHeaders(req *http.Request, cfg connectionConfig) {
 		req.Header.Set(k, v)
 	}
 	switch cfg.AuthType {
+	case "token":
+		if cfg.APIKey != "" {
+			req.Header.Set("Authorization", "Token "+cfg.APIKey)
+		}
 	case "none":
 		return
 	case "api_key_header":
@@ -1655,7 +1711,7 @@ func storeBase64ImageResult(ctx context.Context, taskNo string, idx int, raw str
 
 func storeBase64MediaResult(ctx context.Context, taskNo string, idx int, raw, contentType, kind string) (string, error) {
 	if objectStore == nil {
-		return "", nil
+		return "", fmt.Errorf("对象存储未配置")
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -1683,7 +1739,10 @@ func storeBase64MediaResult(ctx context.Context, taskNo string, idx int, raw, co
 	if kind == "audio" && !validDownloadedMedia("audio", contentType, data) {
 		return "", fmt.Errorf("invalid audio base64 content type=%s", contentType)
 	}
-	if kind == "image" && !validDownloadedMedia("image", contentType, data) {
+	if kind == "audio" && detectRawAudioContentType(data) == "" && !validDownloadedMedia("audio", "", data) && !strings.Contains(strings.ToLower(contentType), "pcm") && !(strings.Contains(strings.ToLower(contentType), "m4a") && bytes.Contains(data[:minInt(len(data), 64)], []byte("ftyp"))) {
+		return "", fmt.Errorf("invalid audio base64 bytes")
+	}
+	if kind == "image" && !validDownloadedMedia("image", "", data) {
 		return "", fmt.Errorf("invalid image base64 content type=%s", contentType)
 	}
 	ext := mediaExtForContentType(contentType, kind)
@@ -2351,14 +2410,23 @@ type mediaItem struct {
 }
 
 type pollConfig struct {
-	Path     string
-	Method   string
-	Body     map[string]interface{}
-	Interval time.Duration
-	Timeout  time.Duration
+	Path        string
+	Method      string
+	Body        map[string]interface{}
+	Interval    time.Duration
+	Timeout     time.Duration
+	RuntimeRule map[string]interface{}
 }
 
 func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, endpoint string) error {
+	// Native protocols wrap image/video references in {url: ...}; keep that shape.
+	for _, key := range []string{"image", "video", "last_frame"} {
+		if object, ok := payload[key].(map[string]interface{}); ok {
+			if source, ok := object["url"].(string); ok && (strings.HasPrefix(source, "data:") || isPrivateMediaURL(source)) {
+				object["url"] = normalizeReferenceImage(ctx, source)
+			}
+		}
+	}
 	if content, ok := payload["content"].([]interface{}); ok {
 		for _, raw := range content {
 			item, _ := raw.(map[string]interface{})
@@ -2378,6 +2446,9 @@ func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, 
 	for _, key := range []string{"image", "image_url", "images", "reference_images", "first_frame", "last_frame", "reference_audio"} {
 		v, ok := payload[key]
 		if !ok || v == nil {
+			continue
+		}
+		if _, nested := v.(map[string]interface{}); nested {
 			continue
 		}
 		// Sora /v1/videos：image_url 必须是公网 URL 或改走 multipart，禁止塞入巨型 base64 JSON
@@ -2405,6 +2476,11 @@ func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, 
 		payload[key] = normalized
 	}
 	if input, ok := payload["input"].(map[string]interface{}); ok {
+		for _, key := range []string{"img_url", "first_frame_url", "last_frame_url"} {
+			if source, ok := input[key].(string); ok {
+				input[key] = normalizeReferenceImage(ctx, source)
+			}
+		}
 		if media, ok := input["media"].([]interface{}); ok {
 			for _, raw := range media {
 				item, _ := raw.(map[string]interface{})
@@ -2472,16 +2548,20 @@ func collapseMediaToString(v interface{}) string {
 
 // postVideoUpstream uses JSON (public image_url) or multipart (local/private reference file).
 func postVideoUpstream(ctx context.Context, conn connectionConfig, endpoint string, payload, runtimeRule map[string]interface{}, taskNo string) ([]byte, int, error) {
-	if isDolaSeedanceAdapter(runtimeRule) {
-		return postDolaVideoUpstream(ctx, conn, endpoint, payload, runtimeRule, taskNo)
-	}
 	target := joinBaseEndpoint(conn.BaseURL, endpoint)
 	refURL := ""
 	if s, ok := payload["image_url"].(string); ok {
 		refURL = strings.TrimSpace(s)
 	}
-	useMultipart := refURL != "" && (strings.HasPrefix(refURL, "data:") || isPrivateMediaURL(refURL))
+	if refURL == "" {
+		refURL = strings.TrimSpace(stringAny(payload["input_reference"]))
+	}
+	format := strings.ToLower(stringAny(upstreamMediaConfig(runtimeRule)["request_format"]))
+	useMultipart := format == "multipart" || (format != "json" && refURL != "" && (strings.HasPrefix(refURL, "data:") || isPrivateMediaURL(refURL)))
 	if useMultipart {
+		if refURL == "" {
+			return doMultipartFilesRequest(ctx, conn, target, payload, nil, upstreamRequestTimeout(runtimeRule, false), 96<<20)
+		}
 		fileData, contentType, err := loadMediaBytes(ctx, refURL)
 		if err != nil {
 			return nil, 0, err
@@ -2492,83 +2572,17 @@ func postVideoUpstream(ctx context.Context, conn connectionConfig, endpoint stri
 		delete(payload, "image_url")
 		delete(payload, "image")
 		delete(payload, "reference_images")
+		delete(payload, "input_reference")
 		log.Printf("Task %s video upstream multipart POST %s fields=%v fileBytes=%d", taskNo, target, payloadFieldKeys(payload), len(fileData))
 		respBody, statusCode, err := doMultipartRequest(ctx, conn, target, payload, "input_reference", fileNameForMIME(contentType), fileData, contentType, 3*time.Minute)
 		log.Printf("Task %s video upstream multipart response %d: %s", taskNo, statusCode, truncateText(string(respBody), 500))
 		return respBody, statusCode, err
 	}
 	body, _ := json.Marshal(payload)
-	log.Printf("Task %s video upstream JSON POST %s body=%s", taskNo, target, truncateText(string(body), 800))
-	respBody, statusCode, err := doJSONRequest(ctx, conn, "POST", target, body, 3*time.Minute)
-	log.Printf("Task %s video upstream JSON response %d: %s", taskNo, statusCode, truncateText(string(respBody), 500))
-	return respBody, statusCode, err
-}
-
-func isDolaSeedanceAdapter(runtimeRule map[string]interface{}) bool {
-	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
-	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "dola_seedance_30s")
-}
-
-func postDolaVideoUpstream(ctx context.Context, conn connectionConfig, endpoint string, payload, runtimeRule map[string]interface{}, taskNo string) ([]byte, int, error) {
-	prompt := strings.TrimSpace(fmt.Sprint(payload["prompt"]))
-	if length := len([]rune(prompt)); length < 1 || length > 3000 {
-		return nil, 0, errors.New("Dola 提示词必须为 1～3000 个字符")
-	}
-	ratio := strings.TrimSpace(fmt.Sprint(payload["ratio"]))
-	allowedRatios := map[string]bool{"16:9": true, "9:16": true, "1:1": true, "3:4": true, "4:3": true, "21:9": true}
-	if !allowedRatios[ratio] {
-		return nil, 0, fmt.Errorf("Dola 不支持画面比例 %q", ratio)
-	}
-	if seconds := strings.TrimSpace(fmt.Sprint(payload["seconds"])); seconds != "30" {
-		return nil, 0, errors.New("Dola 视频时长固定为 30 秒")
-	}
-
-	references := referenceImageSources(payload["reference_images"])
-	if len(references) > 9 {
-		return nil, 0, errors.New("Dola 最多支持 9 张参考图")
-	}
-	const maxImageBytes = int64(20 << 20)
-	files := make([]multipartFile, 0, len(references))
-	var totalBytes int64
-	for index, source := range references {
-		remaining := maxImageBytes - totalBytes
-		if remaining <= 0 {
-			return nil, 0, errors.New("Dola 参考图总大小不能超过 20 MiB")
-		}
-		data, _, err := loadMediaBytesLimit(ctx, source, remaining)
-		if err != nil {
-			return nil, 0, fmt.Errorf("Dola 第 %d 张参考图读取失败: %w", index+1, err)
-		}
-		contentType := http.DetectContentType(data)
-		ext := ""
-		switch contentType {
-		case "image/jpeg":
-			ext = ".jpg"
-		case "image/png":
-			ext = ".png"
-		default:
-			return nil, 0, fmt.Errorf("Dola 第 %d 张参考图仅支持 JPEG 或 PNG", index+1)
-		}
-		totalBytes += int64(len(data))
-		files = append(files, multipartFile{Field: "images[]", Name: fmt.Sprintf("reference-%d%s", index+1, ext), ContentType: contentType, Data: data})
-	}
-
-	target := joinBaseEndpoint(conn.BaseURL, endpoint)
-	fields := map[string]interface{}{"prompt": prompt, "ratio": ratio, "seconds": "30"}
 	timeout := upstreamRequestTimeout(runtimeRule, false)
-	log.Printf("Task %s Dola multipart POST %s images=%d bytes=%d", taskNo, target, len(files), totalBytes)
-	respBody, statusCode, err := doMultipartFilesRequest(ctx, conn, target, fields, files, timeout, 2<<20)
-	log.Printf("Task %s Dola response %d: %s", taskNo, statusCode, truncateText(string(respBody), 500))
-	if err == nil && statusCode >= 200 && statusCode < 300 {
-		var body map[string]interface{}
-		if json.Unmarshal(respBody, &body) == nil && strings.TrimSpace(fmt.Sprint(body["code"])) != "1" {
-			message := strings.TrimSpace(fmt.Sprint(body["message"]))
-			if message == "" || message == "<nil>" {
-				message = "Dola 创建视频任务失败"
-			}
-			err = errors.New(message)
-		}
-	}
+	log.Printf("Task %s video upstream JSON POST %s body=%s", taskNo, target, truncateText(string(body), 800))
+	respBody, statusCode, err := doJSONRequest(ctx, conn, "POST", target, body, timeout)
+	log.Printf("Task %s video upstream JSON response %d: %s", taskNo, statusCode, truncateText(string(respBody), 500))
 	return respBody, statusCode, err
 }
 
@@ -2749,24 +2763,7 @@ func doJSONRequestWithLimit(ctx context.Context, conn connectionConfig, method, 
 }
 
 func parseUpstreamMedia(body []byte) ([]mediaItem, string) {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		if item, ok := rawAudioMediaItem(body); ok {
-			return []mediaItem{item}, ""
-		}
-		return nil, ""
-	}
-	raw = unwrapUpstreamBody(raw)
-	items := extractMediaItems(raw)
-	upstreamID := scalarString(raw, "task_no", "taskNo", "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
-	if upstreamID == "" {
-		upstreamID = nestedScalarString(raw, "task_no", "taskNo", "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
-	}
-	if len(items) > 0 {
-		return items, upstreamID
-	}
-	// otuapi 等网关：异步任务 ID 在 task_id，顶层 id 常为数字记录号
-	return nil, upstreamID
+	return parseUpstreamMediaWithRule(body, nil)
 }
 
 func upstreamPollPath(body []byte, baseURL string) string {
@@ -2812,6 +2809,8 @@ func detectRawAudioContentType(body []byte) string {
 	switch {
 	case bytes.HasPrefix(body, []byte("ID3")):
 		return "audio/mpeg"
+	case len(body) >= 2 && body[0] == 0xff && (body[1]&0xf6) == 0xf0:
+		return "audio/aac"
 	case len(body) >= 2 && body[0] == 0xff && (body[1]&0xe0) == 0xe0:
 		return "audio/mpeg"
 	case bytes.HasPrefix(body, []byte("fLaC")):
@@ -2848,7 +2847,10 @@ func unwrapUpstreamBody(raw map[string]interface{}) map[string]interface{} {
 
 func extractMediaItems(raw map[string]interface{}) []mediaItem {
 	raw = unwrapUpstreamBody(raw)
-	for _, listKey := range []string{"data", "images", "videos", "audios", "results", "outputs", "files", "choices"} {
+	if explicit, _ := raw["_explicit_media_response"].(bool); explicit {
+		raw = map[string]interface{}{"data": raw["_mapped_media_data"]}
+	}
+	for _, listKey := range []string{"data", "images", "videos", "audios", "results", "outputs", "files", "choices", "creations"} {
 		data, ok := raw[listKey].([]interface{})
 		if !ok {
 			continue
@@ -2916,7 +2918,7 @@ func mediaItemFromMap(m map[string]interface{}) (mediaItem, bool) {
 	if b64 := firstString(m, encodedMediaKeys()...); b64 != "" && looksLikeEncodedMedia(b64) {
 		return mediaItem{B64JSON: b64, MimeType: firstString(m, "mime_type", "mime", "content_type", "format", "audio_format")}, true
 	}
-	for _, key := range []string{"data", "result", "output", "message", "content", "audio", "audio_result", "images", "videos", "audios", "results", "files", "choices"} {
+	for _, key := range []string{"data", "result", "output", "message", "content", "audio", "audio_result", "image", "video", "file", "images", "videos", "audios", "results", "files", "choices", "creations"} {
 		if it, ok := mediaItemFromValue(m[key], m); ok {
 			return it, true
 		}
@@ -2971,11 +2973,14 @@ func firstDirectMediaURL(raw map[string]interface{}) string {
 // otuapi often returns result_url=/v1/videos/{id}/content instead of Apifox CDN video_url.
 func firstSuccessMediaURL(raw map[string]interface{}, upstreamID string, conn connectionConfig) string {
 	raw = unwrapUpstreamBody(raw)
+	if explicit, _ := raw["_explicit_media_response"].(bool); explicit {
+		return ""
+	}
 	if u := firstDirectMediaURL(raw); u != "" {
 		return u
 	}
 	if upstreamID != "" && strings.TrimSpace(conn.BaseURL) != "" {
-		return strings.TrimRight(conn.BaseURL, "/") + "/v1/videos/" + url.PathEscape(upstreamID) + "/content"
+		return joinBaseEndpoint(conn.BaseURL, "/v1/videos/"+url.PathEscape(upstreamID)+"/content")
 	}
 	for _, key := range []string{"video_url", "result_url", "url", "download_url", "file_url", "fail_reason", "content_url"} {
 		if u := firstMediaURL(raw, key); u != "" && upstreamURLMatchesTask(u, upstreamID) {
@@ -3272,8 +3277,14 @@ func buildMediaDownloadCandidates(conn connectionConfig, mediaURL, upstreamID st
 		seen[u] = true
 		out = append(out, u)
 	}
+	// Preserve the known Sora wrong-task content correction, while respecting
+	// explicit result URLs returned by native/custom protocols.
+	soraContent := strings.Contains(strings.ToLower(mediaURL), "/v1/videos/") && strings.HasSuffix(strings.ToLower(mediaURL), "/content")
+	if !soraContent {
+		add(mediaURL)
+	}
 	if upstreamID != "" && strings.TrimSpace(conn.BaseURL) != "" {
-		add(strings.TrimRight(conn.BaseURL, "/") + "/v1/videos/" + url.PathEscape(upstreamID) + "/content")
+		add(joinBaseEndpoint(conn.BaseURL, "/v1/videos/"+url.PathEscape(upstreamID)+"/content"))
 	}
 	add(mediaURL)
 	return out
@@ -3302,11 +3313,28 @@ func downloadRetryDelay(attempt, statusCode int) time.Duration {
 }
 
 func downloadAuthenticatedMedia(ctx context.Context, conn connectionConfig, mediaURL string, maxBytes int64) ([]byte, string, error) {
-	client := &http.Client{Timeout: 15 * time.Minute}
+	client := &http.Client{Timeout: 15 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many media redirects")
+		}
+		if !sameOriginURL(req.URL.String(), conn.BaseURL) {
+			// Go retains custom API-key headers (and Authorization across ports).
+			// A signed CDN redirect must not inherit gateway credentials.
+			req.Header.Del("Authorization")
+			req.Header.Del(conn.APIKeyHeader)
+			for key := range conn.Headers {
+				req.Header.Del(key)
+			}
+		}
+		return nil
+	}}
 	const maxAttempts = 45
 	var resp *http.Response
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		req, err := http.NewRequestWithContext(ctx, "GET", mediaURL, nil)
 		if err != nil {
 			return nil, "", err
@@ -3318,7 +3346,7 @@ func downloadAuthenticatedMedia(ctx context.Context, conn connectionConfig, medi
 		resp, err = client.Do(req)
 		if err != nil {
 			if attempt < maxAttempts {
-				time.Sleep(downloadRetryDelay(attempt, 0))
+				waitMediaPoll(ctx, downloadRetryDelay(attempt, 0))
 				continue
 			}
 			return nil, "", fmt.Errorf("下载上游视频失败: %w", err)
@@ -3332,7 +3360,7 @@ func downloadAuthenticatedMedia(ctx context.Context, conn connectionConfig, medi
 			delay := downloadRetryDelay(attempt, resp.StatusCode)
 			log.Printf("download %s HTTP %d (attempt %d/%d), retry in %s: %s",
 				truncateText(mediaURL, 60), resp.StatusCode, attempt, maxAttempts, delay, truncateText(string(body), 100))
-			time.Sleep(delay)
+			waitMediaPoll(ctx, delay)
 			continue
 		}
 		break
@@ -3393,7 +3421,9 @@ func mediaExtForContentType(contentType, kind string) string {
 			return ".wav"
 		case strings.Contains(ct, "ogg"):
 			return ".ogg"
-		case strings.Contains(ct, "m4a"), strings.Contains(ct, "aac"):
+		case strings.Contains(ct, "aac"):
+			return ".aac"
+		case strings.Contains(ct, "m4a"):
 			return ".m4a"
 		case strings.Contains(ct, "flac"):
 			return ".flac"
@@ -3433,6 +3463,10 @@ func scalarString(m map[string]interface{}, keys ...string) string {
 			if t != 0 {
 				return strings.TrimSpace(fmt.Sprintf("%.0f", t))
 			}
+		case json.Number:
+			if value, err := t.Float64(); err == nil && value != 0 {
+				return t.String()
+			}
 		case int, int64:
 			s := strings.TrimSpace(fmt.Sprint(t))
 			if s != "" && s != "0" {
@@ -3449,10 +3483,11 @@ func scalarString(m map[string]interface{}, keys ...string) string {
 
 func parsePollConfig(runtimeRule map[string]interface{}, createEndpoint string) pollConfig {
 	cfg := pollConfig{
-		Path:     strings.TrimRight(createEndpoint, "/") + "/{id}",
-		Method:   http.MethodGet,
-		Interval: 5 * time.Second,
-		Timeout:  defaultPollTimeout,
+		Path:        strings.TrimRight(createEndpoint, "/") + "/{id}",
+		Method:      http.MethodGet,
+		Interval:    5 * time.Second,
+		Timeout:     defaultPollTimeout,
+		RuntimeRule: runtimeRule,
 	}
 	up, _ := runtimeRule["upstream"].(map[string]interface{})
 	if up == nil {
@@ -3466,9 +3501,6 @@ func parsePollConfig(runtimeRule map[string]interface{}, createEndpoint string) 
 	}
 	if body, ok := up["poll_body"].(map[string]interface{}); ok {
 		cfg.Body = body
-	}
-	if strings.Contains(createEndpoint, "/v1/videos") && strings.Contains(cfg.Path, "/v1/video/generations") {
-		cfg.Path = "/v1/videos/{id}"
 	}
 	if d := secondsFromAny(up["poll_interval_sec"]); d > 0 {
 		cfg.Interval = d
@@ -3543,6 +3575,9 @@ func parseProgressPercent(raw string) int {
 func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionConfig, cfg pollConfig, upstreamID, taskNo string) ([]mediaItem, upstreamUsageDetails, error) {
 	pollConn := connectionForTaskPoll(conn)
 	escapedID := url.PathEscape(upstreamID)
+	if queryStart := strings.Index(cfg.Path, "?"); queryStart >= 0 && strings.Index(cfg.Path, "{id}") > queryStart {
+		escapedID = url.QueryEscape(upstreamID)
+	}
 	pollURL := joinBaseEndpoint(conn.BaseURL, strings.Replace(cfg.Path, "{id}", escapedID, 1))
 	pollMethod := strings.ToUpper(strings.TrimSpace(cfg.Method))
 	if pollMethod == "" {
@@ -3555,6 +3590,9 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 	const maxSuccessWait = 36
 	attempt := 0
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return nil, upstreamUsageDetails{}, err
+		}
 		attempt++
 		var requestBody []byte
 		if len(cfg.Body) > 0 {
@@ -3568,7 +3606,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			if attempt == 1 || attempt%6 == 0 {
 				log.Printf("Task %s poll #%d request error: %v", taskNo, attempt, err)
 			}
-			time.Sleep(cfg.Interval)
+			waitMediaPoll(ctx, cfg.Interval)
 			continue
 		}
 		if statusCode == 404 {
@@ -3582,17 +3620,25 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			if consecutiveErrors >= 12 {
 				return nil, upstreamUsageDetails{}, fmt.Errorf("上游轮询持续失败(HTTP %d): %s", statusCode, truncateText(upstreamErrorMessage(body), 200))
 			}
-			time.Sleep(cfg.Interval)
+			waitMediaPoll(ctx, cfg.Interval)
 			continue
 		}
 		consecutiveErrors = 0
-		var raw map[string]interface{}
-		if err := json.Unmarshal(body, &raw); err != nil {
-			time.Sleep(cfg.Interval)
+		raw, decodeErr := mediaResponseForRule(body, cfg.RuntimeRule)
+		if decodeErr != nil {
+			waitMediaPoll(ctx, cfg.Interval)
 			continue
 		}
-		raw = unwrapUpstreamBody(raw)
+		if message := mediaBusinessErrorWithRule(raw, cfg.RuntimeRule); message != "" {
+			return nil, upstreamUsageDetails{}, fmt.Errorf("%s", humanizeUpstreamFailure(message))
+		}
 		status := strings.ToLower(firstString(raw, "status", "state", "task_status"))
+		if mediaFailureStatus(status, cfg.RuntimeRule) {
+			status = "failed"
+		}
+		if mediaSuccessStatus(status, cfg.RuntimeRule) {
+			status = "success"
+		}
 		progress := scalarString(raw, "progress")
 		if status != lastStatus || attempt == 1 || attempt%12 == 0 {
 			log.Printf("Task %s poll #%d status=%s progress=%s", taskNo, attempt, status, progress)
@@ -3620,16 +3666,22 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			}
 			return nil, upstreamUsageDetails{}, fmt.Errorf("%s", humanizeUpstreamFailure(msg))
 		case "succeeded", "success", "completed", "done", "finished", "5":
+			raw["task_id"] = upstreamID
 			if failMsg := upstreamContentFailure(raw); failMsg != "" {
 				return nil, upstreamUsageDetails{}, fmt.Errorf("%s", failMsg)
 			}
 			if items := extractMediaItems(raw); len(items) > 0 {
 				log.Printf("Task %s poll #%d got %d media item(s)", taskNo, attempt, len(items))
-				return items, upstreamUsageFromBody(body), nil
+				return items, upstreamUsageFromBodyWithRule(body, cfg.RuntimeRule), nil
+			}
+			if items, resultErr := resolveUpstreamMediaResult(ctx, pollConn, cfg, raw); resultErr != nil {
+				return nil, upstreamUsageDetails{}, resultErr
+			} else if len(items) > 0 {
+				return items, upstreamUsageFromBodyWithRule(body, cfg.RuntimeRule), nil
 			}
 			if mediaURL := firstSuccessMediaURL(raw, upstreamID, conn); mediaURL != "" {
 				log.Printf("Task %s poll #%d got media url: %s", taskNo, attempt, truncateText(mediaURL, 100))
-				return []mediaItem{{URL: mediaURL}}, upstreamUsageFromBody(body), nil
+				return []mediaItem{{URL: mediaURL}}, upstreamUsageFromBodyWithRule(body, cfg.RuntimeRule), nil
 			}
 			successPolls++
 			if successPolls < maxSuccessWait {
@@ -3639,7 +3691,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 						truncateText(firstString(raw, "result_url"), 80),
 						truncateText(firstString(raw, "video_url"), 80))
 				}
-				time.Sleep(cfg.Interval)
+				waitMediaPoll(ctx, cfg.Interval)
 				continue
 			}
 			return nil, upstreamUsageDetails{}, fmt.Errorf("上游未返回可下载的视频地址，请稍后重试: %s", truncateText(string(body), 400))
@@ -3650,7 +3702,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 				log.Printf("Task %s poll #%d unknown status %q: %s", taskNo, attempt, status, truncateText(string(body), 200))
 			}
 		}
-		time.Sleep(cfg.Interval)
+		waitMediaPoll(ctx, cfg.Interval)
 	}
 	return nil, upstreamUsageDetails{}, fmt.Errorf("生成超时（已轮询 %s），请稍后重试", cfg.Timeout)
 }
@@ -3665,19 +3717,26 @@ type upstreamUsageDetails struct {
 	HasInputSeconds    bool
 	HasOutputSeconds   bool
 	HasInputImageCount bool
+	HasTokens          bool
+	HasPromptTokens    bool
+	HasOutputTokens    bool
+	HasVideoTokens     bool
 }
 
 func (u upstreamUsageDetails) hasAny() bool {
-	return u.PromptTokens > 0 || u.OutputTokens > 0 || u.VideoTokens > 0 || u.HasInputSeconds || u.HasOutputSeconds || u.HasInputImageCount
+	return u.HasTokens || u.PromptTokens > 0 || u.OutputTokens > 0 || u.VideoTokens > 0 || u.HasInputSeconds || u.HasOutputSeconds || u.HasInputImageCount
 }
 
 func inputWithActualUpstreamUsage(input map[string]interface{}, usage upstreamUsageDetails) map[string]interface{} {
-	if usage.VideoTokens <= 0 && !usage.HasInputSeconds && !usage.HasOutputSeconds && !usage.HasInputImageCount {
+	if !usage.HasTokens && usage.VideoTokens <= 0 && !usage.HasInputSeconds && !usage.HasOutputSeconds && !usage.HasInputImageCount {
 		return input
 	}
 	out := make(map[string]interface{}, len(input)+4)
 	for key, value := range input {
 		out[key] = value
+	}
+	if usage.HasTokens {
+		out["_actual_token_usage"] = true
 	}
 	if usage.HasInputSeconds {
 		out["_actual_input_seconds"] = usage.InputSeconds
@@ -3688,7 +3747,7 @@ func inputWithActualUpstreamUsage(input map[string]interface{}, usage upstreamUs
 	if usage.HasInputImageCount {
 		out["_actual_input_image_count"] = usage.InputImageCount
 	}
-	if usage.VideoTokens > 0 {
+	if usage.HasTokens || usage.VideoTokens > 0 {
 		out["_actual_video_tokens"] = usage.VideoTokens
 	}
 	return out
@@ -3700,8 +3759,8 @@ func upstreamUsageTokens(body []byte) (int, int) {
 }
 
 func upstreamUsageFromBody(body []byte) upstreamUsageDetails {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	raw, err := decodeMediaResponse(body)
+	if err != nil {
 		return upstreamUsageDetails{}
 	}
 	queue := []map[string]interface{}{raw}
@@ -3709,32 +3768,7 @@ func upstreamUsageFromBody(body []byte) upstreamUsageDetails {
 		current := queue[0]
 		queue = queue[1:]
 		if usage, ok := current["usage"].(map[string]interface{}); ok {
-			details := upstreamUsageDetails{
-				PromptTokens: intAny(firstNonNil(usage["prompt_tokens"], usage["input_tokens"], usage["text_tokens"])),
-				OutputTokens: intAny(firstNonNil(usage["completion_tokens"], usage["output_tokens"], usage["audio_tokens"])),
-				VideoTokens:  intAny(firstNonNil(usage["total_tokens"], usage["video_tokens"])),
-			}
-			if details.VideoTokens <= 0 {
-				details.VideoTokens = details.OutputTokens
-			}
-			if details.OutputTokens <= 0 && details.VideoTokens > 0 {
-				details.OutputTokens = details.VideoTokens
-			}
-			if value, exists := usage["input_seconds"]; exists {
-				details.InputSeconds, details.HasInputSeconds = floatAny(value), true
-			}
-			if value, exists := usage["output_seconds"]; exists {
-				details.OutputSeconds, details.HasOutputSeconds = floatAny(value), true
-			}
-			if value, exists := usage["input_image_count"]; exists {
-				details.InputImageCount, details.HasInputImageCount = intAny(value), true
-			}
-			if !details.HasOutputSeconds {
-				if value, exists := usage["total_seconds"]; exists {
-					details.OutputSeconds = math.Max(0, floatAny(value)-details.InputSeconds)
-					details.HasOutputSeconds = true
-				}
-			}
+			details := normalizedMediaUsage(usage)
 			if details.hasAny() {
 				return details
 			}
@@ -3933,6 +3967,13 @@ func insertNotification(ctx context.Context, pool *pgxpool.Pool, userID int64, t
 }
 
 func chargeBillingWithFinalize(ctx context.Context, pool *pgxpool.Pool, userID int64, freezeAmount, actualAmount float64, refType, refID, txType, remark string, finalize func(pgx.Tx) error) error {
+	if !finiteWorkerMoney(freezeAmount, actualAmount) {
+		return fmt.Errorf("billing amounts must be finite")
+	}
+	actualAmount = roundWorkerBillingAmount(actualAmount)
+	if !finiteWorkerMoney(actualAmount) {
+		return fmt.Errorf("billing amount overflow")
+	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -3941,6 +3982,9 @@ func chargeBillingWithFinalize(ctx context.Context, pool *pgxpool.Pool, userID i
 	var balance, frozen float64
 	if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1 FOR UPDATE`, userID).Scan(&balance, &frozen); err != nil {
 		return err
+	}
+	if !finiteWorkerMoney(balance, frozen) {
+		return fmt.Errorf("wallet balances must be finite")
 	}
 	lockedAmount, err := lockedFreezeAmount(ctx, tx, userID, refType, refID)
 	if err != nil {
@@ -3957,6 +4001,9 @@ func chargeBillingWithFinalize(ctx context.Context, pool *pgxpool.Pool, userID i
 		}
 		newBalance := balance - charge
 		newFrozen := frozen - lockedAmount
+		if !finiteWorkerMoney(newBalance, newFrozen) {
+			return fmt.Errorf("billing balance overflow")
+		}
 		if newFrozen < 0 {
 			newFrozen = 0
 		}
@@ -4022,9 +4069,29 @@ func lockedFreezeAmount(ctx context.Context, tx pgx.Tx, userID int64, refType, r
 		if err := rows.Scan(&amount); err != nil {
 			return 0, err
 		}
+		if !finiteWorkerMoney(amount) || amount < 0 {
+			return 0, fmt.Errorf("invalid billing reservation amount")
+		}
 		total += amount
+		if !finiteWorkerMoney(total) {
+			return 0, fmt.Errorf("billing reservation overflow")
+		}
 	}
 	return total, rows.Err()
+}
+
+func finiteWorkerMoney(values ...float64) bool {
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+// Wallets use NUMERIC(18,6); settle at the same precision before comparing reservations.
+func roundWorkerBillingAmount(value float64) float64 {
+	return math.Round(value*1_000_000) / 1_000_000
 }
 
 func getenv(key, fallback string) string {

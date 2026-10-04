@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import Image from "next/image";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { type CSSProperties, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Bot, Boxes, Check, Clock3, Code2, Compass, Copy, Download, Headphones, ImageIcon, KeyRound, MessageCircle, Phone, Play, Sparkles, UserRound, Wand2, X } from "lucide-react";
 import { siAlibabacloud, siAnthropic, siDeepseek, siFlux, siGooglegemini, siHuggingface, siKuaishou, type SimpleIcon } from "simple-icons";
-import { LoginModal } from "@/components/LoginModal";
 import { SiteBrand, useSiteBranding } from "@/components/SiteBrand";
 import { UILanguageSelector } from "@/components/UILanguageSelector";
 import { useI18n } from "@/i18n/I18nProvider";
@@ -48,6 +48,7 @@ const MODEL_TICKER: TickerLogo[] = [
 ];
 
 const LANDING_GALLERY_LIMIT = 12;
+const LoginModal = dynamic(() => import("@/components/LoginModal").then((module) => module.LoginModal), { ssr: false });
 
 function InteractiveHeroCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -700,6 +701,7 @@ export default function LandingPageClient() {
   const [showLogin, setShowLogin] = useState(false);
   const [gallery, setGallery] = useState<ReferenceGalleryItem[]>([]);
   const [galleryLoading, setGalleryLoading] = useState(true);
+  const gallerySectionRef = useRef<HTMLElement>(null);
   const branding = useSiteBranding();
   const { site_name, site_copyright, api_docs_enabled, api_docs_operations } = branding;
   const apiDocsVisible = api_docs_enabled !== false && (!api_docs_operations || Object.keys(api_docs_operations).length === 0 || Object.values(api_docs_operations).some((value) => value !== false));
@@ -724,13 +726,28 @@ export default function LandingPageClient() {
 
   useEffect(() => {
     let active = true;
-    loadReferenceGalleryManifest()
-      .then((manifest) => {
-        if (active) setGallery(randomReferenceCases(manifest.cases, LANDING_GALLERY_LIMIT));
-      })
-      .catch(() => { if (active) setGallery([]); })
-      .finally(() => { if (active) setGalleryLoading(false); });
-    return () => { active = false; };
+    const load = () => {
+      loadReferenceGalleryManifest()
+        .then((manifest) => {
+          if (active) setGallery(randomReferenceCases(manifest.cases, LANDING_GALLERY_LIMIT));
+        })
+        .catch(() => { if (active) setGallery([]); })
+        .finally(() => { if (active) setGalleryLoading(false); });
+    };
+    // The external gallery is below the fold; fetch it as the reader approaches it.
+    const section = gallerySectionRef.current;
+    if (!section || typeof IntersectionObserver === "undefined") {
+      load();
+      return () => { active = false; };
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        load();
+      }
+    }, { rootMargin: "300px" });
+    observer.observe(section);
+    return () => { active = false; observer.disconnect(); };
   }, []);
 
   const capabilityCards = useMemo(
@@ -969,7 +986,7 @@ export default function LandingPageClient() {
         </div>
       </section>
 
-      <section className="relative overflow-hidden border-y border-white/10 bg-[#12170f] px-4 py-20 sm:px-8">
+      <section ref={gallerySectionRef} className="relative overflow-hidden border-y border-white/10 bg-[#12170f] px-4 py-20 sm:px-8">
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(215,188,112,.1),transparent_34%),linear-gradient(180deg,rgba(18,214,163,.07),transparent_50%)]" />
         <div className="relative mx-auto max-w-7xl">
           <div className="mb-10 flex flex-col justify-between gap-4 md:flex-row md:items-end">
@@ -1048,7 +1065,7 @@ export default function LandingPageClient() {
       ) : (
         <CustomerService config={branding} />
       )}
-      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} />
+      {showLogin && <LoginModal open onClose={() => setShowLogin(false)} />}
     </div>
   );
 }

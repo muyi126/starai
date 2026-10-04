@@ -3162,6 +3162,9 @@ func estimateModelCostByCodeWorker(ctx context.Context, pool *pgxpool.Pool, code
 }
 
 func estimateModelCostByIDWorker(ctx context.Context, pool *pgxpool.Pool, modelID int64, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
+	if snapshot, ok := params["_price_rule_snapshot"].(map[string]interface{}); ok && len(snapshot) > 0 {
+		return estimatePriceRuleCostWorker(snapshot, params, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens)
+	}
 	var raw []byte
 	var category string
 	if err := pool.QueryRow(ctx, `SELECT price_rule, category FROM models WHERE id=$1`, modelID).Scan(&raw, &category); err != nil {
@@ -3193,7 +3196,8 @@ func workerBillingParams(params map[string]interface{}, category string) map[str
 }
 
 func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
-	switch stringAny(rule["billing_type"]) {
+	promptTokens, outputTokens = max(0, promptTokens), max(0, outputTokens)
+	switch strings.ToLower(strings.TrimSpace(stringAny(rule["billing_type"]))) {
 	case "per_image":
 		n := floatAny(params["n"])
 		if n <= 0 {
@@ -3202,9 +3206,15 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		if n <= 0 {
 			n = 1
 		}
+		if actual, valid := mediaUsageTokens(params, "_actual_output_image_count"); valid {
+			n = actual
+		}
 		return workerImageTierValue(rule, params, "unit_price_by_size", "unit_price") * n
 	case "per_token":
-		promptTokens, outputTokens = workerEstimatedTokenCounts(rule, params, promptTokens, outputTokens)
+		actualUsage, _ := params["_actual_token_usage"].(bool)
+		if !actualUsage {
+			promptTokens, outputTokens = workerEstimatedTokenCounts(rule, params, promptTokens, outputTokens)
+		}
 		// 以管理后台设定的输入/输出/缓存单价为准：缓存 token 按缓存单价计，其余输入按输入单价计。
 		if cacheReadTokens < 0 {
 			cacheReadTokens = 0
@@ -3212,14 +3222,8 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		if cacheWriteTokens < 0 {
 			cacheWriteTokens = 0
 		}
-		if cacheReadTokens+cacheWriteTokens > promptTokens {
-			overflow := cacheReadTokens + cacheWriteTokens - promptTokens
-			if cacheWriteTokens >= overflow {
-				cacheWriteTokens -= overflow
-			} else {
-				cacheReadTokens = promptTokens - cacheWriteTokens
-			}
-		}
+		cacheReadTokens = min(cacheReadTokens, promptTokens)
+		cacheWriteTokens = min(cacheWriteTokens, promptTokens-cacheReadTokens)
 		uncachedInput := promptTokens - cacheReadTokens - cacheWriteTokens
 		inputPrice := tokenPriceWorker(rule, "input_price")
 		cacheReadPrice := tokenPriceWorker(rule, "cache_read_price")
@@ -3238,20 +3242,12 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		if count <= 0 {
 			count = 1
 		}
+		if actualUsage {
+			count = 1
+		}
 		return cost * count
 	case "per_second":
-		duration := workerDurationSeconds(params)
-		if actual := floatAny(params["_actual_output_seconds"]); actual > 0 {
-			duration = actual
-		}
-		n := floatAny(params["count"])
-		if n <= 0 {
-			n = floatAny(params["n"])
-		}
-		if n <= 0 {
-			n = 1
-		}
-		return floatAny(rule["unit_price"]) * duration * n
+		return floatAny(rule["unit_price"]) * workerBillableSeconds(params)
 	case "per_request":
 		return floatAny(rule["unit_price"])
 	case "dynamic":
@@ -3357,7 +3353,7 @@ func estimateMiniMaxH3PriceRuleCostWorker(rule, params map[string]interface{}) f
 		inputVideoRate = rate
 	}
 	outputSeconds := workerDurationSeconds(params)
-	if actual := floatAny(params["_actual_output_seconds"]); actual > 0 {
+	if actual, valid := mediaUsageNumber(params, "_actual_output_seconds"); valid {
 		outputSeconds = actual
 	}
 	inputMaterialsBillable := true
@@ -3432,21 +3428,22 @@ func estimateSeedance2PriceRuleCostWorker(rule, params map[string]interface{}) f
 		}
 		rate = defaultRates[resolution][rateKind]
 	}
-	tokens := floatAny(params["_actual_video_tokens"])
-	if tokens <= 0 {
+	tokens, actualTokens := mediaUsageTokens(params, "_actual_video_tokens")
+	if !actualTokens {
 		duration := workerDurationSeconds(params)
-		if actual := floatAny(params["_actual_output_seconds"]); actual > 0 {
+		if actual, valid := mediaUsageNumber(params, "_actual_output_seconds"); valid {
 			duration = actual
 		}
 		tokens = duration * tokensPerSecond
 		if hasVideo {
 			inputDuration := floatAny(params["reference_video_duration_seconds"])
-			if _, exists := params["_actual_input_seconds"]; exists {
-				inputDuration = math.Max(0, floatAny(params["_actual_input_seconds"]))
+			actualInput, hasActualInput := mediaUsageNumber(params, "_actual_input_seconds")
+			if hasActualInput {
+				inputDuration = actualInput
 			} else if inputDuration <= 0 {
 				inputDuration = floatAny(rule["default_input_video_seconds"])
 			}
-			if inputDuration <= 0 {
+			if !hasActualInput && inputDuration <= 0 {
 				inputDuration = 4
 			}
 			tokens = (duration + inputDuration) * tokensPerSecond
@@ -3483,7 +3480,7 @@ func nestedWorkerFloat(raw interface{}, first, second string) float64 {
 }
 
 func workerDurationSeconds(params map[string]interface{}) float64 {
-	for _, key := range []string{"duration", "duration_sec", "seconds"} {
+	for _, key := range []string{"duration", "duration_seconds", "duration_sec", "seconds"} {
 		if value := floatAny(params[key]); value > 0 {
 			return value
 		}
@@ -5567,6 +5564,9 @@ func intAny(v interface{}) int {
 		return t
 	case float64:
 		return int(t)
+	case json.Number:
+		value, _ := t.Int64()
+		return int(value)
 	case string:
 		n, _ := strconv.Atoi(strings.TrimSpace(t))
 		return n
@@ -5585,6 +5585,9 @@ func floatAny(v interface{}) float64 {
 		return float64(t)
 	case int64:
 		return float64(t)
+	case json.Number:
+		value, _ := t.Float64()
+		return value
 	case string:
 		f, _ := strconv.ParseFloat(strings.TrimSpace(t), 64)
 		return f

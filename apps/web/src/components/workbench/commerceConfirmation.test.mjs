@@ -5,10 +5,11 @@ import vm from "node:vm";
 import ts from "typescript";
 
 const source = ts.createSourceFile("agent.tsx", readFileSync(new URL("./AgentWorkspace.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let confirm, restore;
+let confirm, restore, normalize;
 function visit(node) {
   if (ts.isVariableDeclaration(node) && node.name.getText(source) === "confirmStep") confirm = node.initializer.getText(source);
   if (ts.isCallExpression(node) && node.expression.getText(source) === "useEffect" && node.arguments[0]?.getText(source).includes("commerceParamsProjectRef.current")) restore = node.arguments[0].getText(source);
+  if (ts.isFunctionDeclaration(node) && node.name?.text === "normalizeCreativeMode") normalize = node.getText(source);
   ts.forEachChild(node, visit);
 }
 visit(source);
@@ -40,6 +41,7 @@ test("commerce confirmation sends the current image controls; other workflows ke
 test("opening history restores saved confirmation controls without resetting live edits on polling", () => {
   const values = {};
   const ctx = {
+    normalizeCreativeMode: callback(normalize, {}),
     code: "ecommerce_image",
     project: { public_id: "history", inputs: { count: 4, aspect_ratio: "1:1", image_size: "1K", creative_mode: "precise" }, outputs: { confirmation_payload: { params: { count: 2, aspect_ratio: "9:16", image_size: "2K", detail_section_count: 6 } } } },
     commerceParamsProjectRef: { current: "" },
@@ -47,7 +49,6 @@ test("opening history restores saved confirmation controls without resetting liv
     setImageSize: value => { values.tier = value; }, setDetailSectionCount: value => { values.sections = value; },
     setDetailSectionCountLocked: value => { values.sectionsLocked = value; },
     setCreativeMode: value => { values.creativeMode = value; },
-    normalizeCreativeMode: value => value === "render_text" || value === "precise" ? value : "free",
   };
   const run = callback(restore, ctx);
   run();

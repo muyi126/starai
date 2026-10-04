@@ -3,16 +3,22 @@
 import { pollAsync } from "@/lib/pollAsync";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { api, apiForLocale } from "@/lib/api";
 import { SchemaForm, schemaDefaults } from "@/components/workbench/SchemaForm";
 import { useI18n } from "@/i18n/I18nProvider";
 import { AgentIcon } from "@/components/workbench/AgentIcon";
-import { NovelWorkshopLanding } from "@/components/workbench/NovelWorkshopLanding";
-import { PhotoStudioLanding, PhotoStudioInputBar, PhotoStudioTopBar } from "@/components/workbench/PhotoStudioLanding";
-import { VirtualTryOnInputBar, VirtualTryOnLanding, VirtualTryOnResult } from "@/components/workbench/VirtualTryOnLanding";
-import { NovelChapterList } from "@/components/workbench/NovelChapterList";
 import { Loader2 } from "lucide-react";
+
+const NovelWorkshopLanding = dynamic(() => import("@/components/workbench/NovelWorkshopLanding").then(module => module.NovelWorkshopLanding));
+const NovelChapterList = dynamic(() => import("@/components/workbench/NovelChapterList").then(module => module.NovelChapterList));
+const PhotoStudioLanding = dynamic(() => import("@/components/workbench/PhotoStudioLanding").then(module => module.PhotoStudioLanding));
+const PhotoStudioInputBar = dynamic(() => import("@/components/workbench/PhotoStudioLanding").then(module => module.PhotoStudioInputBar));
+const PhotoStudioTopBar = dynamic(() => import("@/components/workbench/PhotoStudioLanding").then(module => module.PhotoStudioTopBar));
+const VirtualTryOnLanding = dynamic(() => import("@/components/workbench/VirtualTryOnLanding").then(module => module.VirtualTryOnLanding));
+const VirtualTryOnInputBar = dynamic(() => import("@/components/workbench/VirtualTryOnLanding").then(module => module.VirtualTryOnInputBar));
+const VirtualTryOnResult = dynamic(() => import("@/components/workbench/VirtualTryOnLanding").then(module => module.VirtualTryOnResult));
 
 interface Workflow {
   code: string;
@@ -86,6 +92,9 @@ export default function AgentWorkspacePage() {
   const [photoInputKey, setPhotoInputKey] = useState(0);
   const pollRef = useRef<(() => void) | null>(null);
   const pollScopeRef = useRef<string | null>(null);
+  const initializedFormCodeRef = useRef("");
+
+  useEffect(() => { initializedFormCodeRef.current = ""; }, [code]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -94,7 +103,10 @@ export default function AgentWorkspacePage() {
         .then((wf) => {
           if (controller.signal.aborted) return;
           setWorkflow(wf);
-          setForm(schemaDefaults(wf.input_schema));
+          if (initializedFormCodeRef.current !== code) {
+            setForm(schemaDefaults(wf.input_schema));
+            initializedFormCodeRef.current = code;
+          }
         })
         .catch((error) => {
           if (error?.name !== "AbortError") setWorkflow(null);

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -529,31 +530,16 @@ func (s *OpsService) settleTerminalStateFreezes(ctx context.Context) (int, error
 		if err := rows.Scan(&freezeID, &userID, &refType, &refID); err != nil {
 			return n, err
 		}
-		var amount, actualCost float64
-		var refStatus, txType string
-		txType = "workflow_usage"
-		if refType == "task" {
-			var taskType string
-			if err = s.db.QueryRow(ctx, `SELECT status, COALESCE(actual_cost,0), COALESCE(type,'image') FROM tasks WHERE task_no=$1`, refID).Scan(&refStatus, &actualCost, &taskType); err != nil {
-				continue
-			}
-			switch taskType {
-			case "video":
-				txType = "video_usage"
-			case "audio":
-				txType = "audio_usage"
-			default:
-				txType = "image_usage"
-			}
-		} else {
-			if err = s.db.QueryRow(ctx, `SELECT status, COALESCE(actual_cost,0) FROM workflow_projects WHERE public_id=$1`, refID).Scan(&refStatus, &actualCost); err != nil {
-				continue
-			}
-		}
 		tx, err := s.db.Begin(ctx)
 		if err != nil {
 			return n, err
 		}
+		var balance, frozen float64
+		if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1 FOR UPDATE`, userID).Scan(&balance, &frozen); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
+		var amount, actualCost float64
 		var status string
 		if err = tx.QueryRow(ctx, `SELECT status, amount FROM balance_freezes WHERE id=$1 FOR UPDATE`, freezeID).Scan(&status, &amount); err != nil {
 			tx.Rollback(ctx)
@@ -563,21 +549,44 @@ func (s *OpsService) settleTerminalStateFreezes(ctx context.Context) (int, error
 			tx.Rollback(ctx)
 			continue
 		}
-		if _, err = tx.Exec(ctx, `SELECT 1 FROM wallets WHERE user_id=$1 FOR UPDATE`, userID); err != nil {
+		var refStatus, txType string
+		txType = "workflow_usage"
+		if refType == "task" {
+			var taskType string
+			err = tx.QueryRow(ctx, `SELECT status, COALESCE(actual_cost,0), COALESCE(type,'image') FROM tasks WHERE task_no=$1`, refID).Scan(&refStatus, &actualCost, &taskType)
+			switch taskType {
+			case "video":
+				txType = "video_usage"
+			case "audio":
+				txType = "audio_usage"
+			default:
+				txType = "image_usage"
+			}
+		} else {
+			err = tx.QueryRow(ctx, `SELECT status, COALESCE(actual_cost,0) FROM workflow_projects WHERE public_id=$1`, refID).Scan(&refStatus, &actualCost)
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			continue
+		}
+		if refStatus != "succeeded" && refStatus != "failed" && refStatus != "canceled" {
+			tx.Rollback(ctx)
+			continue
+		}
+		var alreadyCharged float64
+		if err = tx.QueryRow(ctx, `
+			SELECT COALESCE(SUM(CASE WHEN direction='out' THEN amount WHEN direction='in' THEN -amount ELSE 0 END),0)
+			FROM wallet_transactions WHERE user_id=$1 AND ref_type=$2 AND ref_id=$3`, userID, refType, refID).Scan(&alreadyCharged); err != nil {
 			tx.Rollback(ctx)
 			return n, err
 		}
-		if refStatus == "succeeded" && actualCost > 0 {
-			var balance, frozen float64
-			if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1`, userID).Scan(&balance, &frozen); err != nil {
-				tx.Rollback(ctx)
-				return n, err
-			}
+		charge := terminalSettlementRemainder(actualCost, alreadyCharged)
+		if charge > 0 {
 			newFrozen := frozen - amount
 			if newFrozen < 0 {
 				newFrozen = 0
 			}
-			if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`, balance-actualCost, newFrozen, userID); err != nil {
+			if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`, balance-charge, newFrozen, userID); err != nil {
 				tx.Rollback(ctx)
 				return n, err
 			}
@@ -587,7 +596,7 @@ func (s *OpsService) settleTerminalStateFreezes(ctx context.Context) (int, error
 			}
 			if _, err = tx.Exec(ctx, `
 				INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark)
-				VALUES ($1,$6,'out',$2,$3,$4,$5,'冻结滞留补结算')`, userID, actualCost, balance-actualCost, refType, refID, txType); err != nil {
+				VALUES ($1,$6,'out',$2,$3,$4,$5,'冻结滞留补结算')`, userID, charge, balance-charge, refType, refID, txType); err != nil {
 				tx.Rollback(ctx)
 				return n, err
 			}
@@ -607,6 +616,14 @@ func (s *OpsService) settleTerminalStateFreezes(ctx context.Context) (int, error
 		n++
 	}
 	return n, rows.Err()
+}
+
+func terminalSettlementRemainder(actualCost, alreadyCharged float64) float64 {
+	remaining := math.Round((actualCost-alreadyCharged)*1_000_000) / 1_000_000
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // failOrphanedStaleTasks 清理没有活动冻结记录的卡住任务（如冻结已被手动释放），

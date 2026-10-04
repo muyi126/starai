@@ -36,9 +36,11 @@ test("image workspaces share a readable inline reference area", () => {
   assert.match(source, /relative z-10 shrink-0 px-3 pb-2 pt-1 sm:px-6 sm:pb-3/);
 });
 
-test("comic source mode sits between the asset library and help on one row", () => {
+test("comic source mode stays between the asset library and help, wrapping on mobile", () => {
   const source = readFileSync(new URL("./AgentWorkspace.tsx", import.meta.url), "utf8");
-  const row = source.slice(source.indexOf('scroll-x-only grid grid-cols-[1fr_auto_1fr] items-center gap-2 overflow-x-auto'), source.indexOf('<div className="flex min-h-[92px]'));
+  const start = source.indexOf('grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[1fr_auto_1fr]');
+  assert.ok(start >= 0, "the comic toolbar should use the responsive grid");
+  const row = source.slice(start, source.indexOf('<div className="flex min-h-[92px]', start));
   const library = row.indexOf('openComicImageLibrary("references")');
   const sourceMode = row.indexOf('checked={comicSourceMode}');
   const help = row.indexOf('setHelpOpen(true)');
@@ -46,5 +48,6 @@ test("comic source mode sits between the asset library and help on one row", () 
   assert.match(row, /justify-self-start/);
   assert.match(row, /justify-self-center/);
   assert.match(row, /justify-self-end/);
+  assert.match(row, /col-span-2 row-start-2.*sm:col-span-1 sm:col-start-2 sm:row-start-1/s);
   assert.doesNotMatch(source, /px-4 pt-3 text-xs.*checked=\{comicSourceMode\}/s, "source mode should not occupy its own row");
 });

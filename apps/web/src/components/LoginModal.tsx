@@ -244,7 +244,9 @@ export function LoginModal({ open, onClose }: Props) {
         setIsNewUser(!!res.is_new_user);
         setStep("set_password");
       } else {
-        if (res.is_new_user) window.localStorage.setItem(SKIP_FORCED_ANNOUNCEMENT_ONCE_KEY, "1");
+        if (res.is_new_user) {
+          try { window.localStorage.setItem(SKIP_FORCED_ANNOUNCEMENT_ONCE_KEY, "1"); } catch { /* optional announcement preference */ }
+        }
         onClose();
         window.location.assign("/app");
       }
@@ -284,7 +286,9 @@ export function LoginModal({ open, onClose }: Props) {
     setError("");
     try {
       await api("/api/auth/set-password", { method: "POST", body: JSON.stringify({ password }) });
-      if (isNewUser) window.localStorage.setItem(SKIP_FORCED_ANNOUNCEMENT_ONCE_KEY, "1");
+      if (isNewUser) {
+        try { window.localStorage.setItem(SKIP_FORCED_ANNOUNCEMENT_ONCE_KEY, "1"); } catch { /* optional announcement preference */ }
+      }
       onClose();
       window.location.assign("/app");
     } catch (err) {

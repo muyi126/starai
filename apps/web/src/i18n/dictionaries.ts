@@ -47,12 +47,21 @@ async function loadSourceTranslations(locale: string) {
   if (loader) sourceTranslations[locale] = (await loader()).default;
 }
 
-export async function loadLocaleDictionaries(locale: string) {
-  await Promise.all([
+const localeLoads = new Map<string, Promise<void>>();
+
+export function loadLocaleDictionaries(locale: string): Promise<void> {
+  const pending = localeLoads.get(locale);
+  if (pending) return pending;
+  const loading = Promise.all([
     loadDictionary(locale),
     loadSourceTranslations(locale),
     locale === "zh-CN" || locale === "en-US" ? Promise.resolve() : loadDictionary("en-US"),
-  ]);
+  ]).then(() => {}).catch((error) => {
+    localeLoads.delete(locale);
+    throw error;
+  });
+  localeLoads.set(locale, loading);
+  return loading;
 }
 
 export type TranslationKey = string;

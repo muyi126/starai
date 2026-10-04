@@ -119,6 +119,9 @@ func normalizeModelRouteInput(in *ModelRouteInput) error {
 	if in.AuthType == "" {
 		in.AuthType = "bearer"
 	}
+	if !map[string]bool{"bearer": true, "token": true, "api_key_header": true, "none": true, "env": true}[in.AuthType] {
+		return errors.New("线路认证方式无效")
+	}
 	if in.APIKeyHeader == "" {
 		in.APIKeyHeader = "Authorization"
 	}
@@ -181,15 +184,16 @@ func validateRouteCostRule(rule map[string]interface{}) error {
 	if !allowed[billingType] {
 		return errors.New("线路成本计费方式无效")
 	}
+	rule["billing_type"] = billingType
 	for _, key := range []string{"input_cost_per_m", "output_cost_per_m", "cache_read_cost_per_m", "cache_write_cost_per_m", "unit_cost"} {
-		if floatValue(rule[key]) < 0 {
-			return errors.New("线路成本不能为负数")
+		if err := normalizePriceNumber(rule, key); err != nil {
+			return err
 		}
 	}
 	if costs, ok := rule["unit_cost_by_size"].(map[string]interface{}); ok {
-		for _, cost := range costs {
-			if floatValue(cost) < 0 {
-				return errors.New("线路图片档位成本不能为负数")
+		for tier := range costs {
+			if err := normalizePriceNumber(costs, tier); err != nil {
+				return err
 			}
 		}
 	}
@@ -797,6 +801,8 @@ func EstimateRouteProviderCostWithTokenDetails(route *ModelRoute, params map[str
 	typeName := strings.ToLower(strings.TrimSpace(stringValue(rule["billing_type"])))
 	switch typeName {
 	case "per_token":
+		promptTokens = max(promptTokens, 0)
+		completionTokens = max(completionTokens, 0)
 		input := floatValue(rule["input_cost_per_m"])
 		output := floatValue(rule["output_cost_per_m"])
 		cacheRead := floatValue(rule["cache_read_cost_per_m"])
@@ -818,22 +824,31 @@ func EstimateRouteProviderCostWithTokenDetails(route *ModelRoute, params map[str
 		}
 		uncached := promptTokens - cacheReadTokens - cacheWriteTokens
 		return (float64(uncached)*input + float64(cacheReadTokens)*cacheRead + float64(cacheWriteTokens)*cacheWrite + float64(completionTokens)*output) / 1_000_000
-	case "per_image", "per_request":
-		count := intFromAny(params["n"], 1)
+	case "per_request":
+		count := 1.0
+		if actual, exists := actualBillingCount(params, "_actual_request_count"); exists {
+			count = actual
+		}
+		return count * floatValue(rule["unit_cost"])
+	case "per_image":
+		unitCost := imageTierPrice(rule, params, "unit_cost_by_size", "unit_cost")
+		if actual, exists := actualBillingCount(params, "_actual_output_image_count"); exists {
+			return actual * unitCost
+		}
+		count := intFromAny(params["n"], 0)
 		if count <= 0 {
 			count = intFromAny(params["count"], 1)
 		}
-		unitCost := floatValue(rule["unit_cost"])
-		if typeName == "per_image" {
-			unitCost = imageTierPrice(rule, params, "unit_cost_by_size", "unit_cost")
+		if count <= 0 {
+			count = 1
 		}
 		return float64(count) * unitCost
 	case "per_second":
-		seconds := floatValue(params["duration"])
-		if seconds <= 0 {
-			seconds = 1
+		seconds := parseDurationSeconds(params)
+		if actual, exists := actualOutputSeconds(params); exists {
+			return actual * floatValue(rule["unit_cost"])
 		}
-		return seconds * floatValue(rule["unit_cost"])
+		return seconds * billingItemCount(params) * floatValue(rule["unit_cost"])
 	default:
 		return floatValue(rule["unit_cost"])
 	}

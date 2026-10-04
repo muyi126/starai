@@ -62,32 +62,35 @@ type DashboardStats struct {
 
 func (s *AdminService) Dashboard(ctx context.Context) (*DashboardStats, error) {
 	var stats DashboardStats
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&stats.TotalUsers)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE created_at >= CURRENT_DATE`).Scan(&stats.NewUsersToday)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks`).Scan(&stats.TotalTasks)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE created_at >= CURRENT_DATE`).Scan(&stats.TasksToday)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE status='succeeded'`).Scan(&stats.SucceededTasks)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE status='failed'`).Scan(&stats.FailedTasks)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM models WHERE is_enabled=true`).Scan(&stats.ActiveModels)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='paid'`).Scan(&stats.OnlineRevenue)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM wallet_transactions WHERE direction='in' AND type='card_recharge'`).Scan(&stats.CardRechargeAmount)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM wallet_transactions WHERE direction='out'`).Scan(&stats.TotalConsumption)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM wallet_transactions WHERE direction='out' AND created_at >= CURRENT_DATE`).Scan(&stats.ConsumptionToday)
+	// Aggregate each table once, in one round trip and one database snapshot.
+	err := s.db.QueryRow(ctx, `SELECT u.*, t.*, m.*, o.*, wt.*, tok.*, calls.*, cards.*, w.*, g.*, a.*, rewards.*
+		FROM (SELECT COUNT(*), COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE),
+			COUNT(*) FILTER (WHERE referrer_id IS NOT NULL), COUNT(DISTINCT referrer_id) FROM users) u
+		CROSS JOIN (SELECT COUNT(*), COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE),
+			COUNT(*) FILTER (WHERE status='succeeded'), COUNT(*) FILTER (WHERE status='failed') FROM tasks) t
+		CROSS JOIN (SELECT COUNT(*) FROM models WHERE is_enabled=true) m
+		CROSS JOIN (SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='paid') o
+		CROSS JOIN (SELECT COALESCE(SUM(amount) FILTER (WHERE direction='in' AND type='card_recharge'),0),
+			COALESCE(SUM(amount) FILTER (WHERE direction='out'),0),
+			COALESCE(SUM(amount) FILTER (WHERE direction='out' AND created_at >= CURRENT_DATE),0) FROM wallet_transactions) wt
+		CROSS JOIN (SELECT COUNT(*) FROM api_tokens WHERE status='active') tok
+		CROSS JOIN (SELECT COUNT(*), COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE), COALESCE(SUM(cost),0) FROM ai_call_logs) calls
+		CROSS JOIN (SELECT COUNT(*) FILTER (WHERE status='unused'), COUNT(*) FILTER (WHERE status='used'), COALESCE(SUM(value),0) FROM recharge_cards) cards
+		CROSS JOIN (SELECT COALESCE(SUM(compute_balance),0) FROM wallets) w
+		CROSS JOIN (SELECT COUNT(*) FROM gallery_items WHERE status='approved') g
+		CROSS JOIN (SELECT COUNT(*) FROM announcements WHERE is_published=true) a
+		CROSS JOIN (SELECT COALESCE(SUM(amount) FILTER (WHERE reward_account='compute'),0),
+			COALESCE(SUM(amount) FILTER (WHERE reward_account='cash'),0) FROM referral_rewards) rewards`).Scan(
+		&stats.TotalUsers, &stats.NewUsersToday, &stats.ReferredUsers, &stats.ActiveReferrers,
+		&stats.TotalTasks, &stats.TasksToday, &stats.SucceededTasks, &stats.FailedTasks,
+		&stats.ActiveModels, &stats.OnlineRevenue, &stats.CardRechargeAmount, &stats.TotalConsumption, &stats.ConsumptionToday,
+		&stats.ApiTokens, &stats.ApiCalls, &stats.ApiCallsToday, &stats.ApiCost,
+		&stats.AvailableCards, &stats.UsedCards, &stats.TotalCardFaceValue, &stats.WalletBalanceTotal,
+		&stats.PublishedWorks, &stats.PublishedAnnouncements, &stats.ReferralRewardCompute, &stats.ReferralRewardCash)
+	if err != nil {
+		return nil, err
+	}
 	stats.TotalRevenue = stats.OnlineRevenue + stats.CardRechargeAmount
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM api_tokens WHERE status='active'`).Scan(&stats.ApiTokens)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM ai_call_logs`).Scan(&stats.ApiCalls)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM ai_call_logs WHERE created_at >= CURRENT_DATE`).Scan(&stats.ApiCallsToday)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(cost),0) FROM ai_call_logs`).Scan(&stats.ApiCost)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recharge_cards WHERE status='unused'`).Scan(&stats.AvailableCards)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM recharge_cards WHERE status='used'`).Scan(&stats.UsedCards)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(value),0) FROM recharge_cards`).Scan(&stats.TotalCardFaceValue)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(compute_balance),0) FROM wallets`).Scan(&stats.WalletBalanceTotal)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM gallery_items WHERE status='approved'`).Scan(&stats.PublishedWorks)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM announcements WHERE is_published=true`).Scan(&stats.PublishedAnnouncements)
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE referrer_id IS NOT NULL`).Scan(&stats.ReferredUsers)
-	s.db.QueryRow(ctx, `SELECT COUNT(DISTINCT referrer_id) FROM users WHERE referrer_id IS NOT NULL`).Scan(&stats.ActiveReferrers)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM referral_rewards WHERE reward_account='compute'`).Scan(&stats.ReferralRewardCompute)
-	s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0) FROM referral_rewards WHERE reward_account='cash'`).Scan(&stats.ReferralRewardCash)
 	return &stats, nil
 }
 
@@ -1508,10 +1511,76 @@ func (s *AdminService) GetRawSystemConfigs(ctx context.Context) (map[string]inte
 	return result, nil
 }
 
-// GetPublicSystemConfigs leaves the large per-locale translation catalog out
-// of the base response. Translations are read separately for one locale.
+type SeedancePortraitConfig struct {
+	Enabled     bool
+	AccessKey   string
+	SecretKey   string
+	ProjectName string
+	GatewayURL  string
+	SiteBaseURL string
+}
+
+func (s *AdminService) GetSeedancePortraitConfig(ctx context.Context) (SeedancePortraitConfig, error) {
+	values := map[string]interface{}{}
+	rows, err := s.db.Query(ctx, `SELECT key,value FROM system_configs WHERE key=ANY($1)`, []string{
+		"seedance_portrait_enabled", "seedance_volc_access_key", "seedance_volc_secret_key",
+		"seedance_volc_project_name", "seedance_gateway_base_url", "site_base_url",
+	})
+	if err != nil {
+		return SeedancePortraitConfig{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var raw []byte
+		if err := rows.Scan(&key, &raw); err != nil {
+			return SeedancePortraitConfig{}, err
+		}
+		var value interface{}
+		_ = json.Unmarshal(raw, &value)
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return SeedancePortraitConfig{}, err
+	}
+	text := func(key, fallback string) string {
+		value := strings.TrimSpace(fmt.Sprint(values[key]))
+		if value == "" || value == "<nil>" {
+			return fallback
+		}
+		return value
+	}
+	accessKey, err := util.DecryptSecret(text("seedance_volc_access_key", ""), s.cardCipherKey)
+	if err != nil {
+		return SeedancePortraitConfig{}, errors.New("Seedance 火山 Access Key 解密失败")
+	}
+	secretKey, err := util.DecryptSecret(text("seedance_volc_secret_key", ""), s.cardCipherKey)
+	if err != nil {
+		return SeedancePortraitConfig{}, errors.New("Seedance 火山 Secret Key 解密失败")
+	}
+	enabled, _ := values["seedance_portrait_enabled"].(bool)
+	return SeedancePortraitConfig{
+		Enabled: enabled, AccessKey: accessKey, SecretKey: secretKey,
+		ProjectName: text("seedance_volc_project_name", "default"),
+		GatewayURL:  text("seedance_gateway_base_url", "https://tp-api.chinadatapay.com:8000/seedance-gateway"),
+		SiteBaseURL: strings.TrimRight(text("site_base_url", ""), "/"),
+	}, nil
+}
+
+// Fetch only the fields consumed by the public response; private settings and
+// the per-locale translation catalog need not cross the database connection.
 func (s *AdminService) GetPublicSystemConfigs(ctx context.Context) (map[string]interface{}, error) {
-	rows, err := s.db.Query(ctx, `SELECT key,value FROM system_configs WHERE key<>'ui_translation_overrides'`)
+	rows, err := s.db.Query(ctx, `SELECT key,value FROM system_configs WHERE key=ANY($1)`, []string{
+		"site_base_url", "workbench_default_theme", "site_name", "site_logo", "site_favicon",
+		"site_description", "admin_site_description", "site_api_tagline", "work_retention_days",
+		"api_docs_enabled", "api_docs_operations", "site_copyright", "home_meta_title", "home_meta_description",
+		"terms_title", "terms_content", "privacy_title", "privacy_content", "image_captcha_enabled",
+		"customer_service_enabled", "customer_service_mode", "customer_service_custom_script",
+		"customer_service_title", "customer_service_name", "customer_service_subtitle",
+		"customer_service_floating_image", "customer_service_avatar", "customer_service_qr_url",
+		"customer_service_qr_tip", "customer_service_phone", "customer_service_wechat", "customer_service_hours",
+		"default_locale", "generation_languages", "ui_languages", "web_search_enabled", "web_search_unit_price",
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1563,6 +1632,13 @@ func (s *AdminService) UpdateSystemConfig(ctx context.Context, key string, value
 		if text, ok := value.(string); ok && isMaskedAdminSecret(text) {
 			return nil
 		}
+	}
+	if (key == "seedance_volc_access_key" || key == "seedance_volc_secret_key") && strings.TrimSpace(fmt.Sprint(value)) != "" {
+		sealed, err := util.EncryptSecret(strings.TrimSpace(fmt.Sprint(value)), s.cardCipherKey)
+		if err != nil {
+			return fmt.Errorf("Seedance 火山密钥加密失败: %w", err)
+		}
+		value = sealed
 	}
 	data, _ := json.Marshal(value)
 	_, err := s.db.Exec(ctx, `
@@ -1654,12 +1730,12 @@ func (s *AdminService) LogOperation(ctx context.Context, adminID int64, action, 
 
 func isSensitiveConfigKey(key string) bool {
 	k := strings.ToLower(key)
-	return strings.Contains(k, "api_key") || strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password")
+	return strings.Contains(k, "api_key") || strings.Contains(k, "access_key") || strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password")
 }
 
 func isSensitiveDetailKey(key string) bool {
 	k := strings.ToLower(key)
-	return strings.Contains(k, "api_key") || strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "authorization")
+	return strings.Contains(k, "api_key") || strings.Contains(k, "access_key") || strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "authorization")
 }
 
 func redactSensitiveDetail(v interface{}) interface{} {

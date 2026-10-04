@@ -4,6 +4,7 @@ import { readEventStream } from "@/lib/eventStream";
 import { pollAsync } from "@/lib/pollAsync";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -44,13 +45,14 @@ import { notificationTitle } from "@/lib/notificationText";
 import { CATEGORY_TAG, MODEL_ICONS } from "./categoryMeta";
 import { SchemaForm, schemaDefaults, schemaProperties } from "./SchemaForm";
 import { BottomBar, ChatTopTools, type BottomBarState } from "./BottomBar";
-import { PricingModal } from "@/components/workbench/PricingModal";
 import { AudioOptionToolbar, AudioTopControls } from "./audio/AudioOptionToolbar";
 import { AudioUploadButton } from "./audio/AudioUploadButton";
 import { VideoUploadArea } from "./video/VideoUploadArea";
 import { VideoOptionToolbar, VideoTopControls } from "./video/VideoOptionToolbar";
 import { ALL_RATIOS, ImageGenerationToolbar, buildImageGenerationParams, normalizeRatio, normalizeTier, type ImageAspectRatio, type ImageSizeTier } from "./ImageGenerationToolbar";
 import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } from "./GenerationLanguageMenu";
+
+const PricingModal = dynamic(() => import("./PricingModal").then(module => module.PricingModal));
 
 interface Message {
   role: "user" | "assistant";
@@ -150,6 +152,7 @@ function sizeBasedVideoSchema(schema: Model["input_schema"], runtimeRule: Model[
       "1280x720": "横屏 720P",
       "720x1280": "竖屏 720P",
       ...(profile === "omni_reference" ? {} : { "1920x1080": "横屏 1080P", "1080x1920": "竖屏 1080P" }),
+      ...(sizeField.enumLabels || {}),
     },
     default: sizes.includes(defaultSize) ? defaultSize : sizes[0],
     "x-widget": "option_menu",
@@ -756,7 +759,7 @@ function InputToolbarMeta({
         <button
           type="button"
           onClick={onPricing}
-          className="h-[17px] px-1.5 rounded-md text-[10px] leading-none text-gray-500 hover:text-primary whitespace-nowrap transition underline-offset-2 hover:underline"
+          className="h-[17px] px-1.5 rounded-md text-[10px] leading-none text-gray-500 dark:text-gray-400 hover:text-primary whitespace-nowrap transition underline-offset-2 hover:underline"
           title={t("workspace.viewPricing")}
         >
           {costHint}
@@ -880,7 +883,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   );
   const activeSummaryCode =
     selectionChannelKey === bottom.channel_key && selectedSummaryCode ? selectedSummaryCode : presetSummaryCodes[0] || "";
-  const workbenchInputSchema = useMemo(
+  const workbenchInputSchema = useMemo<Record<string, unknown>>(
     () => (isAudio ? singleResultAudioSchema(model.input_schema) : sizeBasedVideoSchema(model.input_schema, model.runtime_rule, model.default_params)),
     [isAudio, model.input_schema, model.runtime_rule, model.default_params]
   );
@@ -945,7 +948,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       videoAdapter === "veo_frame_pair_v1" ||
       isLegacyVeoFlFramePair);
   const isFramePairUpload =
-    isVideo && (videoConfig.upload_profile === "frame_pair" || isVeoFramePair);
+    isVideo && (videoConfig.upload_profile === "frame_pair" || videoConfig.upload_profile === "first_frame" || isVeoFramePair);
   const videoUploadConfig = isVeoFramePair
     ? {
         ...videoConfig,
@@ -1011,7 +1014,25 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     ]
   );
 
+  const initializationKey = useMemo(() => {
+    // Ignore translated presentation fields only at their known config paths.
+    const schemaLabels = ["title", "description", "placeholder", "x-enum-labels", "enumLabels"];
+    const presentationFields = new Map<unknown, string[]>([[workbenchInputSchema, schemaLabels]]);
+    for (const prop of Object.values(schemaProperties(workbenchInputSchema))) presentationFields.set(prop, schemaLabels);
+    const video = model.runtime_rule?.video as Record<string, any> | undefined;
+    presentationFields.set(model.runtime_rule?.audio, ["prompt_hint", "secondary_prompt_hint"]);
+    presentationFields.set(video, ["prompt_hint"]);
+    for (const slot of [video?.frames?.first, video?.frames?.last, video?.reference_images, video?.reference_videos, video?.reference_audios]) presentationFields.set(slot, ["label"]);
+    const configKey = JSON.stringify([workbenchInputSchema, model.runtime_rule], function (key, value) {
+      return presentationFields.get(this)?.includes(key) ? undefined : value;
+    });
+    return JSON.stringify([model.code, initialPrompt, model.default_params, configKey, isVideo, isAudio, isImage, capDeepThink, reasoningConfig.default_enabled, imageAllowsAutoRatio, imageCountMax]);
+  }, [model.code, initialPrompt, model.default_params, workbenchInputSchema, model.runtime_rule, isVideo, isAudio, isImage, capDeepThink, reasoningConfig.default_enabled, imageAllowsAutoRatio, imageCountMax]);
+  const initializedParamsKeyRef = useRef("");
+
   useEffect(() => {
+    if (initializedParamsKeyRef.current === initializationKey) return;
+    initializedParamsKeyRef.current = initializationKey;
     const secondaryKey = parseAudioRuntime(model.runtime_rule).secondary_prompt_key || "style_prompt";
     const defaults = model.default_params || {};
     setParams({
@@ -1025,6 +1046,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     setAudioSecondaryPrompt(String(defaults[secondaryKey] ?? ""));
     setAudioRef(null);
     if (isImage) {
+      setImageCount(Math.min(imageCountMax, Math.max(1, Number(defaults.count ?? defaults.n ?? 1) || 1)));
       setImageSize(defaultImageSizeForConfig(model.runtime_rule, defaults));
       const defaultRatio = String(defaults.aspect_ratio || "1:1");
       setImageRatio(defaultRatio === "auto" && imageAllowsAutoRatio ? "auto" : normalizeRatio(defaultRatio));
@@ -1035,7 +1057,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     }));
     setDeepThink(capDeepThink && reasoningConfig.default_enabled === true);
     setPrompt(initialPrompt || "");
-  }, [model.code, initialPrompt, isVideo, isAudio, isImage, workbenchInputSchema, model.default_params, model.runtime_rule, capDeepThink, reasoningConfig.default_enabled, imageAllowsAutoRatio]);
+  }, [initializationKey, model.code, initialPrompt, isVideo, isAudio, isImage, workbenchInputSchema, model.default_params, model.runtime_rule, capDeepThink, reasoningConfig.default_enabled, imageAllowsAutoRatio, imageCountMax]);
 
   useEffect(() => {
     const selectedAssets = bottom.asset_ids?.length ? { asset_ids: bottom.asset_ids } : {};
@@ -1125,7 +1147,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
 
   useEffect(() => {
     if (!isChat) return;
-    api<{ items: ChannelPreset[] }>("/api/channel-presets")
+    apiCached<{ items: ChannelPreset[] }>("/api/channel-presets")
       .then((r) => setChannelPresets(r.items || []))
       .catch(() => setChannelPresets([]));
     apiCached<any[]>("/api/models?category=chat")
@@ -1686,8 +1708,24 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       alert(t("workspace.enterText"));
       return;
     }
+    if (isAudio && Array.isArray(workbenchInputSchema.required)) {
+      const properties = schemaProperties(workbenchInputSchema);
+      const missing = workbenchInputSchema.required.find((key) => typeof key === "string" && properties[key] && (params[key] == null || typeof params[key] === "string" && !params[key].trim()));
+      if (typeof missing === "string") {
+        alert(`${t("workspace.enterText")} (${ts(properties[missing].title || missing)})`);
+        return;
+      }
+    }
     if (!isVideo && !isAudio && !prompt.trim()) return;
-    if (isVideo && videoMedia.reference_images.length < (videoConfig.min_reference_images || 0)) {
+    if (isImage && refImages.length < Number(imageRuntime.min_reference_images || 0)) {
+      alert(t("canvas.node.referenceVisualRequired"));
+      return;
+    }
+    if (isVideo && videoConfig.upload_profile === "first_frame" && Array.isArray(workbenchInputSchema.required) && workbenchInputSchema.required.includes("first_frame") && !videoMedia.first_frame?.url) {
+      alert(t("canvas.node.firstFrameRequired"));
+      return;
+    }
+    if (isVideo && videoConfig.upload_profile !== "first_frame" && videoMedia.reference_images.length < (videoConfig.min_reference_images || 0)) {
       alert(t("canvas.node.referenceVisualRequired"));
       return;
     }
@@ -2399,7 +2437,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                               maxReferenceImages={1}
                               assetLibraryLabel={`${t("video.firstFrame")} · ${t("asset.library")}`}
                             />
-                            <ChatTopTools
+                            {videoConfig.upload_profile !== "first_frame" && <ChatTopTools
                               value={bottom}
                               onChange={setBottom}
                               showUpload={false}
@@ -2411,8 +2449,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                               }
                               maxReferenceImages={1}
                               assetLibraryLabel={`${t("video.lastFrame")} · ${t("asset.library")}`}
-                            />
-                            {!isVeoFramePair && maxVideoAssetRefs > 0 ? (
+                            />}
+                            {!isVeoFramePair && videoConfig.upload_profile !== "first_frame" && maxVideoAssetRefs > 0 ? (
                               <ChatTopTools
                                 value={bottom}
                                 onChange={setBottom}
@@ -2507,9 +2545,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                     </div>
                     <InputToolbarMeta
                       onPricing={() => setPricingOpen(true)}
-                      pricingLabel={t("workspace.tokenBilling")}
+                      pricingLabel={model.price_rule?.billing_type === "per_token" ? t("workspace.tokenBilling") : model.price_rule?.billing_type === "per_second" ? ts("按秒计费") : model.price_rule?.billing_type === "dynamic" ? ts("动态计费") : ts("按次计费")}
                       costHint={
-                        audioConfig.billing_hint === "per_token"
+                        model.price_rule?.billing_type === "per_token" || audioConfig.billing_hint !== "estimated"
                           ? undefined
                           : estimatedCost != null
                             ? `Est. ${estimatedCost.toFixed(2)}/run`
@@ -2748,10 +2786,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                       onExactSizeChange={isAliyunQwenImage ? (value) => setParams({ ...params, size: value }) : undefined}
                       countOptions={imageCountOptions}
                       countMax={imageCountMax}
+                      countAllowCustom={imageRuntime.count_allow_custom !== false}
                       sizeTiers={imageSizeTiers}
                       ratios={isOpenAIImages ? (["1:1", "3:2", "2:3"] as ImageAspectRatio[]) : imageRatios}
                       allowAutoRatio={imageAllowsAutoRatio}
-                      showSizeTier={!isOpenAIImages}
+                      showSizeTier={!isOpenAIImages && imageRuntime.show_size_tier !== false}
                     />
                     <VideoOptionToolbar schema={imageOptionSchema} values={params} onChange={setParams} />
                     <GenerationLanguageMenu languages={generationLanguages} value={languageCode} onChange={setLanguageCode} />
@@ -2967,7 +3006,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         </>
       )}
 
-      <PricingModal open={pricingOpen} onClose={() => setPricingOpen(false)} currentModelCode={model.code} />
+      {pricingOpen && <PricingModal open={pricingOpen} onClose={() => setPricingOpen(false)} currentModelCode={model.code} />}
     </div>
   );
 }

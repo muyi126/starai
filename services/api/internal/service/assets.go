@@ -34,6 +34,59 @@ type AssetDTO struct {
 	ObjectKey   string   `json:"-"`
 }
 
+type SeedancePortraitGroup struct {
+	GroupID     string `json:"group_id"`
+	ProjectName string `json:"project_name"`
+	CreatedAt   string `json:"created_at"`
+}
+
+func (s *AssetService) SaveSeedancePortraitGroup(ctx context.Context, userID int64, groupID, projectName string) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO seedance_portrait_groups(user_id,group_id,project_name)
+		VALUES($1,$2,$3) ON CONFLICT(user_id,group_id) DO UPDATE SET project_name=EXCLUDED.project_name`,
+		userID, strings.TrimSpace(groupID), strings.TrimSpace(projectName))
+	return err
+}
+
+func (s *AssetService) ListSeedancePortraitGroups(ctx context.Context, userID int64) ([]SeedancePortraitGroup, error) {
+	rows, err := s.db.Query(ctx, `SELECT group_id,project_name,created_at FROM seedance_portrait_groups WHERE user_id=$1 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SeedancePortraitGroup{}
+	for rows.Next() {
+		var item SeedancePortraitGroup
+		var created time.Time
+		if err := rows.Scan(&item.GroupID, &item.ProjectName, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = created.Format(time.RFC3339)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *AssetService) OwnsSeedancePortraitGroup(ctx context.Context, userID int64, groupID, projectName string) bool {
+	var exists bool
+	err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM seedance_portrait_groups WHERE user_id=$1 AND group_id=$2 AND project_name=$3)`,
+		userID, strings.TrimSpace(groupID), strings.TrimSpace(projectName)).Scan(&exists)
+	return err == nil && exists
+}
+
+func (s *AssetService) SaveSeedancePortraitAsset(ctx context.Context, userID int64, groupID, assetID, assetType string) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO seedance_portrait_assets(user_id,group_id,asset_id,asset_type)
+		VALUES($1,$2,$3,$4) ON CONFLICT(user_id,asset_id) DO UPDATE SET group_id=EXCLUDED.group_id,asset_type=EXCLUDED.asset_type`,
+		userID, strings.TrimSpace(groupID), strings.TrimSpace(assetID), strings.TrimSpace(assetType))
+	return err
+}
+
+func (s *AssetService) OwnsSeedancePortraitAsset(ctx context.Context, userID int64, assetID string) bool {
+	assetID = strings.TrimPrefix(strings.TrimSpace(assetID), "asset://")
+	var exists bool
+	err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM seedance_portrait_assets WHERE user_id=$1 AND asset_id=$2)`, userID, assetID).Scan(&exists)
+	return err == nil && exists
+}
+
 func (s *AssetService) Create(ctx context.Context, userID int64, publicID, bucket, objectKey string, name *string, description *string, kind string, assetType string, mime *string, size int64, tags []string) error {
 	tagsJSON, _ := json.Marshal(tags)
 	_, err := s.db.Exec(ctx, `

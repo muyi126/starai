@@ -55,6 +55,10 @@ type AgentPlanResponse = { conversation_id?: string; plan?: Plan; search_require
 
 const HOT_PROMPTS = ["生成一套小红书图文笔记和 4 张配图", "根据角色参考图生成 40-50 秒完整短剧", "生成一张产品主图", "做一个 10 秒产品展示视频"];
 const MESSAGE_PAGE_SIZE = 40;
+const CREATIVE_ERROR_SOURCES = {
+  models: "模型列表加载失败，请稍后重试",
+  replan: "方案更新失败，原需求已保留",
+};
 const CREATIVE_FEATURES = [
   { icon: "✦", title: "理解并连续创作", subtitle: "从自然语言识别目标，自动整理提示词并衔接上一轮结果" },
   { icon: "🖼️", title: "图片与内容图文", subtitle: "支持单图、连续改图，以及标题正文与多张配图的一体化生成" },
@@ -441,6 +445,9 @@ export function CreativeAgentWorkspace({
   const [task, setTask] = useState<TaskState | null>(null);
   const [pendingRetry, setPendingRetry] = useState<{ run: TaskState; model: string; message: string; conversation: string } | null>(null);
   const [error, setError] = useState("");
+  const displayedError = error === CREATIVE_ERROR_SOURCES.models || error === CREATIVE_ERROR_SOURCES.replan
+    ? t(error)
+    : error;
   const [copiedMessage, setCopiedMessage] = useState("");
   const [exportingDocument, setExportingDocument] = useState("");
   const [agentStage, setAgentStage] = useState("");
@@ -514,20 +521,22 @@ export function CreativeAgentWorkspace({
           .catch(async (err) => {
             if (sessionEpoch.current !== epoch) return;
             draftRef.current = await api<AgentDraft>(`/api/creative-agent/state/${selectedConversationId}`).catch(() => draftRef.current);
-            setError(err instanceof Error ? err.message : t("方案更新失败，原需求已保留"));
+            setError(err instanceof Error ? err.message : CREATIVE_ERROR_SOURCES.replan);
           }).finally(() => { if (sessionEpoch.current === epoch) setBusy(false); });
       }, 250);
       return () => window.clearTimeout(timer);
     }
-  }, [customEnabled, customMediaType, imageModelCode, videoModelCode, speechModelCode, musicModelCode, bottom.files, bottom.asset_ids, refreshPlan, t]);
+  }, [customEnabled, customMediaType, imageModelCode, videoModelCode, speechModelCode, musicModelCode, bottom.files, bottom.asset_ids, refreshPlan]);
   const uploadRef = useRef<HTMLInputElement>(null);
   const messagesViewportRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
 
   useEffect(() => {
-    Promise.all([apiCached<Model[]>("/api/models"), apiCached<AgentConfig>("/api/agents/general_creative_agent"), apiCached<{ web_search_enabled?: boolean; web_search_unit_price?: number }>("/api/system-configs/public", 60_000, false).catch((): { web_search_enabled?: boolean; web_search_unit_price?: number } => ({}))])
-      .then(([models, agent, publicConfig]) => {
+    let active = true;
+    Promise.all([apiCached<Model[]>("/api/models"), apiCached<AgentConfig>("/api/agents/general_creative_agent")])
+      .then(([models, agent]) => {
+        if (!active) return;
         const enabled = (items: Model[]) => (items || []).filter((item) => item.is_enabled !== false);
         const chats = models.filter((item) => item.category === "chat" || item.category === "multi_collab");
         const nextImages = enabled(models.filter((item) => item.category === "image"));
@@ -554,11 +563,22 @@ export function CreativeAgentWorkspace({
         setMusicModelCode(defaultMusic);
         setDefaultSpeechModelCode(defaultSpeech);
         setDefaultMusicModelCode(defaultMusic);
+      })
+      .catch(() => { if (active) setError(CREATIVE_ERROR_SOURCES.models); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    apiCached<{ web_search_enabled?: boolean; web_search_unit_price?: number }>("/api/system-configs/public", 60_000, false)
+      .then(publicConfig => {
+        if (!active) return;
         setSearchAvailable(publicConfig.web_search_enabled === true);
         setSearchUnitPrice(Math.max(0, Number(publicConfig.web_search_unit_price) || 0));
       })
-      .catch(() => setError(t("模型列表加载失败，请稍后重试")));
-  }, [t]);
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const polledTaskNo = task?.task_no;
   const polledTaskID = task?.public_id;
@@ -1528,7 +1548,7 @@ export function CreativeAgentWorkspace({
               <button type="button" onClick={() => setPendingRetry(null)} className="rounded-lg border border-gray-300 px-3 py-1.5 dark:border-white/20">{ts("取消续传")}</button>
             </div>
           </section>}
-          {error && <div className="mb-2 px-1 text-sm text-red-500"><p>{error}</p>{conversationId && draftRef.current && !["executing", "submitted"].includes(draftRef.current.status) && <button type="button" disabled={busy} className="mt-1 text-xs underline disabled:opacity-50" onClick={() => {
+          {error && <div className="mb-2 px-1 text-sm text-red-500"><p>{displayedError}</p>{conversationId && draftRef.current && !["executing", "submitted"].includes(draftRef.current.status) && <button type="button" disabled={busy} className="mt-1 text-xs underline disabled:opacity-50" onClick={() => {
             setBusy(true); setError("");
             void api<AgentDraft>(`/api/creative-agent/state/${conversationId}`).then((next) => { draftRef.current = next; return refreshPlan(true); }).catch((err) => setError(err instanceof Error ? err.message : t("更新失败"))).finally(() => setBusy(false));
           }}>{ts("同步并更新当前方案，无需重述需求")}</button>}</div>}

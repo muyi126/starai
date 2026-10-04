@@ -26,7 +26,7 @@ func BuildUpstreamVideoPayload(
 	}
 	for k, v := range extraParams {
 		// connection 仅用于 Worker 鉴权，绝不能进入上游请求体
-		if k == "connection" {
+		if k == "connection" || strings.HasPrefix(k, "_") {
 			continue
 		}
 		out[k] = v
@@ -37,7 +37,7 @@ func BuildUpstreamVideoPayload(
 		}
 	}
 	include := upCfg.Include
-	if len(include) == 0 {
+	if len(include) == 0 && !(strings.EqualFold(upCfg.Adapter, "native_media") && upCfg.IncludeSet) {
 		for k := range params {
 			if k != "prompt" {
 				include = append(include, k)
@@ -49,6 +49,9 @@ func BuildUpstreamVideoPayload(
 		include = appendMissing(include, "first_frame", "last_frame", "reference_images")
 	}
 	for _, key := range include {
+		if key == "connection" || strings.HasPrefix(key, "_") {
+			continue
+		}
 		val, ok := params[key]
 		if !ok || val == nil {
 			continue
@@ -71,10 +74,7 @@ func BuildUpstreamVideoPayload(
 		}
 	}
 	out = ApplyUpstreamTransforms(out, runtimeRule, params)
-	if strings.EqualFold(upCfg.Adapter, "dola_seedance_30s") {
-		return buildDolaSeedancePayload(params)
-	}
-	if strings.EqualFold(upCfg.Adapter, "volcengine_seedance_2") {
+	if strings.EqualFold(upCfg.Adapter, "volcengine_seedance_2") || strings.EqualFold(upCfg.Adapter, "topenrouter_seedance_2") {
 		out = buildVolcengineSeedancePayload(out, params)
 	}
 	if strings.EqualFold(upCfg.Adapter, "minimax_h3_v2") {
@@ -89,11 +89,17 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "omni_reference_v1") {
 		out = buildOmniReferencePayload(out, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "octopus_sd_mini_v1") {
+		out = buildOctopusSDMiniPayload(out, params)
+	}
 	if strings.EqualFold(upCfg.Adapter, "aliyun_qwen_image_v3") {
 		out = buildAliyunQwenImagePayload(modelName, params)
 	}
 	if strings.EqualFold(upCfg.Adapter, "aliyun_video_generation") {
 		out = buildAliyunVideoPayload(modelName, params)
+	}
+	if strings.EqualFold(upCfg.Adapter, "aliyun_wan_video") {
+		out = buildAliyunWanVideoPayload(modelName, params)
 	}
 	if strings.EqualFold(upCfg.Adapter, "sync_lipsync") {
 		// Sync accepts visual/audio inputs, not a video-generation prompt or duration.
@@ -121,23 +127,40 @@ func BuildUpstreamVideoPayload(
 	if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" {
 		out["_video_upload_profile"] = uploadProfile
 	}
+	if strings.EqualFold(upCfg.Adapter, "native_media") || strings.EqualFold(upCfg.Adapter, "aliyun_wan_video") {
+		out["_native_media_payload"] = true
+	}
 	return SanitizeUpstreamPayload(out, "")
 }
 
-func buildDolaSeedancePayload(params map[string]interface{}) map[string]interface{} {
-	prompt := strings.TrimSpace(fmt.Sprint(params["prompt"]))
-	if prompt == "<nil>" {
-		prompt = ""
+// Legacy Wan 2.1-2.6 uses named image fields, unlike the newer media array API.
+func buildAliyunWanVideoPayload(model string, params map[string]interface{}) map[string]interface{} {
+	input := map[string]interface{}{}
+	for _, key := range []string{"prompt", "negative_prompt"} {
+		if value, ok := params[key]; ok && !omitAutoValue(value) {
+			input[key] = value
+		}
 	}
-	out := map[string]interface{}{
-		"prompt":  prompt,
-		"ratio":   strings.TrimSpace(fmt.Sprint(params["ratio"])),
-		"seconds": "30",
+	first := firstMediaURL(firstNonNil(params["first_frame"], params["reference_images"]))
+	last := firstMediaURL(params["last_frame"])
+	if last != "" {
+		input["first_frame_url"], input["last_frame_url"] = first, last
+	} else if first != "" {
+		input["img_url"] = first
 	}
-	if refs := mediaURLList(params["reference_images"]); len(refs) > 0 {
-		out["reference_images"] = refs
+	if audio := firstMediaURL(firstNonNil(params["reference_audio"], params["reference_audios"])); audio != "" {
+		input["audio_url"] = audio
 	}
-	return out
+	parameters := map[string]interface{}{}
+	for _, key := range []string{"duration", "size", "resolution", "prompt_extend", "seed", "watermark", "audio", "shot_type"} {
+		if value, ok := params[key]; ok && !omitAutoValue(value) {
+			if key == "duration" {
+				value = normalizeVideoDuration(value)
+			}
+			parameters[key] = value
+		}
+	}
+	return map[string]interface{}{"model": model, "input": input, "parameters": parameters}
 }
 
 func buildAliyunQwenImagePayload(model string, params map[string]interface{}) map[string]interface{} {
@@ -251,6 +274,14 @@ func intValue(value interface{}) int {
 // endpoint hint: e.g. "/v1/videos" enables Sora-style image_url promotion.
 func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[string]interface{} {
 	delete(out, "connection")
+	if native, _ := out["_native_media_payload"].(bool); native {
+		for key := range out {
+			if strings.HasPrefix(key, "_") && (endpoint != "" || key != "_native_media_payload") {
+				delete(out, key)
+			}
+		}
+		return out
+	}
 	preserveVideoParams, _ := out["_preserve_video_params"].(bool)
 	uploadProfile := strings.ToLower(strings.TrimSpace(fmt.Sprint(out["_video_upload_profile"])))
 	normalizedEndpoint := strings.ToLower(strings.TrimSpace(endpoint))
@@ -449,10 +480,11 @@ func durationDigits(params, out map[string]interface{}) string {
 }
 
 type upstreamConfig struct {
-	Include []string
-	Map     map[string]string
-	Static  map[string]interface{}
-	Adapter string
+	Include    []string
+	IncludeSet bool
+	Map        map[string]string
+	Static     map[string]interface{}
+	Adapter    string
 }
 
 func parseUpstreamConfig(runtimeRule map[string]interface{}) upstreamConfig {
@@ -465,11 +497,16 @@ func parseUpstreamConfig(runtimeRule map[string]interface{}) upstreamConfig {
 		return cfg
 	}
 	if arr, ok := up["include"].([]interface{}); ok {
+		cfg.IncludeSet = true
 		for _, item := range arr {
 			if s, ok := item.(string); ok {
 				cfg.Include = append(cfg.Include, s)
 			}
 		}
+	}
+	if arr, ok := up["include"].([]string); ok {
+		cfg.IncludeSet = true
+		cfg.Include = append(cfg.Include, arr...)
 	}
 	if m, ok := up["map"].(map[string]interface{}); ok {
 		for k, v := range m {
@@ -741,6 +778,15 @@ func buildOmniReferencePayload(out, params map[string]interface{}) map[string]in
 		delete(out, "images")
 	}
 	delete(out, "reference_images")
+	return out
+}
+
+func buildOctopusSDMiniPayload(out, params map[string]interface{}) map[string]interface{} {
+	out = buildOmniReferencePayload(out, params)
+	seconds := intValue(params["duration"])
+	if seconds == 5 || seconds == 10 || seconds == 15 {
+		out["seconds"] = strconv.Itoa(seconds)
+	}
 	return out
 }
 

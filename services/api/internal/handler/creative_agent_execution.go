@@ -122,7 +122,7 @@ func creativeAgentTextOnly(text string) bool {
 func guardCreativeAgentIntent(plan map[string]interface{}, text string) map[string]interface{} {
 	intent := strings.ToLower(strings.TrimSpace(stringAny(plan["intent"])))
 	dedicatedWorkflow := intent == "workflow" && strings.TrimSpace(stringAny(plan["workflow_code"])) != ""
-	if intent == "text" || (creativeAgentTextOnly(text) && intent != "chat" && intent != "clarify" && !dedicatedWorkflow) {
+	if intent == "text" || (creativeAgentTextOnly(text) && intent != "chat" && intent != "clarify" && (!dedicatedWorkflow || creativeAgentPromptDraftRequest(text))) {
 		reply := stringAny(plan["reply"])
 		if reply == "" && creativeAgentPromptDraftRequest(text) {
 			reply = creativeAgentArtifactCandidate(plan)

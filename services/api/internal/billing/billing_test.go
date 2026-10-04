@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 )
@@ -13,6 +14,24 @@ func TestSettlementChargesActualAboveReservation(t *testing.T) {
 	}
 	if frozen != 10 {
 		t.Fatalf("frozen = %v, want 10", frozen)
+	}
+}
+
+func TestMoneyMutationsRejectNonFiniteBeforeDatabaseAccess(t *testing.T) {
+	service := &Service{}
+	for _, amount := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		for name, mutate := range map[string]func() error{
+			"freeze":      func() error { return service.Freeze(context.Background(), 1, amount, "task", "1") },
+			"charge":      func() error { return service.Charge(context.Background(), 1, 5, amount, "task", "1", "test", "test") },
+			"credit":      func() error { return service.Credit(context.Background(), 1, amount, "test", "test", "1", "test") },
+			"cash credit": func() error { return service.CreditCash(context.Background(), 1, amount, "test", "test", "1", "test") },
+			"cash debit":  func() error { return service.DebitCash(context.Background(), 1, amount, "test", "test", "1", "test") },
+			"adjust":      func() error { return service.AdjustBalance(context.Background(), 1, amount, "test") },
+		} {
+			if err := mutate(); !errors.Is(err, ErrInvalidAmount) {
+				t.Fatalf("%s accepted nonfinite amount %v: %v", name, amount, err)
+			}
+		}
 	}
 }
 

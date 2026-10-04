@@ -13,7 +13,7 @@ function svgFallback(siteName: string) {
 
 export async function GET() {
   try {
-    const res = await fetch(`${API_URL}/api/system-configs/public`, { cache: "no-store" });
+    const res = await fetch(`${API_URL}/api/system-configs/public`, { next: { revalidate: 60 }, signal: AbortSignal.timeout(5_000) });
     if (res.ok) {
       const json = await res.json();
       const cfg = json?.data || {};

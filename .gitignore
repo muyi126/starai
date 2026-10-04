@@ -7,8 +7,7 @@ out/
 dist/
 build/
 apps/*/.next/
-apps/*/.next-corrupt-*/
-apps/*/.next-stale-*/
+apps/*/.next-*/
 apps/*/out/
 apps/*/dist/
 apps/*/build/
@@ -34,6 +33,8 @@ bin/
 .tmp/
 .tmp-*
 .codex-tmp/
+.codex-diag/
+.tools/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -94,3 +95,17 @@ docs/*-review-*.md
 docs/*-fix-*.md
 docs/*-acceptance-*.md
 docs/*-lipsync-*.md
+docs/performance-i18n-optimization.md
+docs/optimization-plan.md
+docs/i18n-missing-web-zh.md
+docs/superpowers/plans/
+docs/superpowers/specs/
+docs/agent-recovery-2026-09-03.md
+docs/canvas-integrity-2026-09-12.md
+docs/canvas-live-qa-2026-09-10.md
+docs/canvas-performance-2026-09-12.md
+docs/canvas-role-fixes-2026-09-11.md
+
+# These dated documents still contain supported configuration instructions.
+!docs/agent-search-review-2026-09-11.md
+!docs/canvas-media-audit-2026-09-13.md

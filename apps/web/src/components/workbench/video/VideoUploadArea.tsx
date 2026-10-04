@@ -5,6 +5,7 @@ import { ArrowRight, Film, Music2, Plus, UserRound, X } from "lucide-react";
 import type { VideoMediaItem, VideoMediaState, VideoRuntimeConfig } from "@starai/shared-types";
 import { uploadAsset } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
+import { SeedancePortraitDialog } from "./SeedancePortraitDialog";
 
 const IMAGE_ACCEPT = "image/png,image/jpeg,image/webp,image/gif,image/bmp,image/tiff";
 const VIDEO_ACCEPT = "video/mp4,video/quicktime";
@@ -237,7 +238,7 @@ export function VideoUploadArea({
 }) {
   const { t } = useI18n();
   const [uploading, setUploading] = useState(false);
-  const [portraitEditing, setPortraitEditing] = useState(false);
+  const [portraitLibraryOpen, setPortraitLibraryOpen] = useState(false);
   const profile = config.upload_profile || "single_ref";
 
   const uploadOne = async (files: FileList | null, apply: (item: VideoMediaItem) => void) => {
@@ -467,47 +468,25 @@ export function VideoUploadArea({
       );
     }
     return (
+      <>
       <div className="flex min-h-14 w-fit max-w-full flex-wrap items-center gap-1.5">
         {showPortrait && (
           <div className="shrink-0">
-            {portraitEditing || portraitAssetId ? (
-              <div className="flex h-14 w-44 items-center gap-1.5 rounded-xl border border-dashed border-cyan-300 bg-cyan-50/70 px-2 dark:border-cyan-400/30 dark:bg-cyan-400/10">
-                <UserRound size={16} className="shrink-0 text-cyan-600" />
-                <div className="min-w-0 flex-1">
-                  <div className="mb-1 flex items-center gap-1">
-                    <select
-                      value={portraitAssetType || "image"}
-                      onChange={(e) => onPortraitAssetTypeChange?.(e.target.value as "image" | "video")}
-                      className="h-5 rounded border border-cyan-200 bg-white px-1 text-[10px] outline-none dark:border-white/10 dark:bg-gray-900"
-                    >
-                      <option value="image">{t("video.portraitImage")}</option>
-                      <option value="video">{t("video.portraitVideo")}</option>
-                    </select>
-                    <button
-                      type="button"
-                      className="ml-auto text-[10px] text-gray-400 hover:text-red-500"
-                      onClick={() => {
-                        onPortraitAssetIdChange?.("");
-                        setPortraitEditing(false);
-                      }}
-                    >
-                      {t("common.clear")}
-                    </button>
+            {portraitAssetId ? (
+              <div className="relative">
+                <button type="button" onClick={() => setPortraitLibraryOpen(true)} className="flex h-14 w-44 items-center gap-1.5 rounded-xl border border-dashed border-cyan-300 bg-cyan-50/70 px-2 pr-7 text-left dark:border-cyan-400/30 dark:bg-cyan-400/10">
+                  <UserRound size={16} className="shrink-0 text-cyan-600" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[10px] font-medium text-cyan-700 dark:text-cyan-300">{portraitAssetType === "video" ? t("video.portraitVideo") : t("video.portraitImage")}</div>
+                    <div className="mt-1 truncate text-xs text-gray-600 dark:text-gray-200">{portraitAssetId.replace(/^asset:\/\//, "")}</div>
                   </div>
-                  <input
-                    autoFocus={portraitEditing && !portraitAssetId}
-                    value={portraitAssetId || ""}
-                    onChange={(e) => onPortraitAssetIdChange?.(e.target.value)}
-                    placeholder="asset://ASSET_ID"
-                    className="h-7 w-full rounded-lg border border-cyan-200 bg-white px-2 text-xs outline-none focus:border-cyan-400 dark:border-white/10 dark:bg-white/5"
-                    title={t("video.portraitAssetHint")}
-                  />
-                </div>
+                </button>
+                <button type="button" aria-label={t("common.clear")} title={t("common.clear")} onClick={() => onPortraitAssetIdChange?.("")} className="absolute right-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-full bg-white/80 text-gray-400 hover:text-red-500 dark:bg-gray-900/80"><X size={11}/></button>
               </div>
             ) : (
               <button
                 type="button"
-                onClick={() => setPortraitEditing(true)}
+                onClick={() => setPortraitLibraryOpen(true)}
                 title={t("video.portraitAssetHint")}
                 className="flex h-14 w-16 flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-cyan-300 bg-cyan-50/60 text-cyan-700 transition hover:bg-cyan-50 dark:border-cyan-400/30 dark:bg-cyan-400/10 dark:text-cyan-300"
               >
@@ -581,7 +560,22 @@ export function VideoUploadArea({
           </div>
         )}
       </div>
+      <SeedancePortraitDialog
+        open={portraitLibraryOpen}
+        selectedId={portraitAssetId}
+        onClose={() => setPortraitLibraryOpen(false)}
+        onSelect={(id, type) => {
+          onPortraitAssetIdChange?.(id);
+          onPortraitAssetTypeChange?.(type);
+          setPortraitLibraryOpen(false);
+        }}
+      />
+      </>
     );
+  }
+
+  if (profile === "first_frame") {
+    return <FrameSlot label={t("video.firstFrame")} image={media.first_frame} uploading={uploading} onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))} onRemove={() => onChange({ ...media, first_frame: null })} />;
   }
 
   if (profile === "veo_frame_pair") {

@@ -27,11 +27,9 @@ import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } f
 import { useI18n } from "@/i18n/I18nProvider";
 import { AgentLanding, type AgentDisplayStep } from "./AgentLanding";
 import { AgentIcon } from "./AgentIcon";
-import { NovelChapterList } from "./NovelChapterList";
 import { comicAssetProgress } from "./comicProgress";
-import { SystemAssetLibraryDialog, type SystemAssetPick } from "./SystemAssetLibraryDialog";
+import type { SystemAssetPick } from "./SystemAssetLibraryDialog";
 import { composeDetailPage } from "./detailPageCompose";
-import { DetailPageRevisionEditor } from "./DetailPageRevisionEditor";
 import type { DetailTextLayer } from "./detailTextLayers";
 
 const WorkspaceLoading = () => {
@@ -47,6 +45,9 @@ const PhotoStudioTopBar = dynamic(() => import("./PhotoStudioLanding").then((mod
 const VirtualTryOnLanding = dynamic(() => import("./VirtualTryOnLanding").then((module) => module.VirtualTryOnLanding), { loading: WorkspaceLoading });
 const VirtualTryOnInputBar = dynamic(() => import("./VirtualTryOnLanding").then((module) => module.VirtualTryOnInputBar), { loading: () => null });
 const VirtualTryOnResult = dynamic(() => import("./VirtualTryOnLanding").then((module) => module.VirtualTryOnResult), { loading: WorkspaceLoading });
+const NovelChapterList = dynamic(() => import("./NovelChapterList").then(module => module.NovelChapterList), { loading: WorkspaceLoading });
+const DetailPageRevisionEditor = dynamic(() => import("./DetailPageRevisionEditor").then(module => module.DetailPageRevisionEditor), { loading: WorkspaceLoading });
+const SystemAssetLibraryDialog = dynamic(() => import("./SystemAssetLibraryDialog").then(module => module.SystemAssetLibraryDialog));
 
 type DisplayStep = AgentDisplayStep;
 type DisplayConfig = {
@@ -418,6 +419,8 @@ export function AgentWorkspace({ code }: { code: string }) {
   const pollRef = useRef<(() => void) | null>(null);
   const pollScopeRef = useRef<string | null>(null);
   const commerceParamsProjectRef = useRef("");
+  const workflowDefaultsCodeRef = useRef("");
+  const modelDefaultsCodeRef = useRef("");
 
   useEffect(() => {
     if (code !== "ecommerce_image" || !project || commerceParamsProjectRef.current === project.public_id) return;
@@ -432,6 +435,8 @@ export function AgentWorkspace({ code }: { code: string }) {
   }, [code, project]);
 
   useEffect(() => {
+    workflowDefaultsCodeRef.current = "";
+    modelDefaultsCodeRef.current = "";
     setProject(null);
     setPrompt("");
     setProductImage(null);
@@ -450,14 +455,18 @@ export function AgentWorkspace({ code }: { code: string }) {
       .then((wf) => {
         if (!active) return;
         setWorkflow(wf);
-        setCount(Math.max(1, Number(wf.runtime_config?.default_count || 1)));
-        setCreativeMode(normalizeCreativeMode(wf.runtime_config?.default_creative_mode));
+        if (workflowDefaultsCodeRef.current !== code) {
+          setCount(Math.max(1, Number(wf.runtime_config?.default_count || 1)));
+          setCreativeMode(normalizeCreativeMode(wf.runtime_config?.default_creative_mode));
+          workflowDefaultsCodeRef.current = code;
+        }
         const modelCode = wf.runtime_config?.generation_model_code;
         if (modelCode) {
           apiForLocaleCached<Model>(`/api/models/${modelCode}`, locale)
             .then((m) => {
               if (!active) return;
               setGenerationModel(m);
+              if (modelDefaultsCodeRef.current === code) return;
               if (m.category === "image") {
                 const runtimeImage = (m.runtime_rule?.image || {}) as Record<string, unknown>;
                 const defaultRatio = String(m.default_params?.aspect_ratio || "1:1");
@@ -472,11 +481,15 @@ export function AgentWorkspace({ code }: { code: string }) {
               if (typeof m.default_params?.channel_key === "string") {
                 setBottom((prev) => ({ ...prev, channel_key: String(m.default_params.channel_key) }));
               }
+              modelDefaultsCodeRef.current = code;
             })
             .catch(() => { if (active) setGenerationModel(null); });
         } else {
           setGenerationModel(null);
-          setParams({});
+          if (modelDefaultsCodeRef.current !== code) {
+            setParams({});
+            modelDefaultsCodeRef.current = code;
+          }
         }
       })
       .catch(() => { if (active) setWorkflow(null); });
@@ -1607,7 +1620,7 @@ export function AgentWorkspace({ code }: { code: string }) {
           <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.08)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(34,211,238,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.08)_1px,transparent_1px)]" />
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_10%,rgba(34,211,238,.24),transparent_28%),radial-gradient(circle_at_12%_84%,rgba(20,184,166,.18),transparent_22%)] dark:bg-[radial-gradient(circle_at_76%_10%,rgba(20,184,166,.22),transparent_28%),radial-gradient(circle_at_14%_82%,rgba(6,182,212,.14),transparent_22%)]" />
           <div className="scrollbar-none relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2 pb-3 sm:px-5 lg:px-8">
-            {!project && <div className="comic-landing-stack flex min-h-0 flex-1 flex-col justify-start gap-2 py-2 sm:gap-3 sm:py-3 lg:gap-3 lg:py-2">
+            {!project && <div className="comic-landing-stack flex min-h-max flex-1 shrink-0 flex-col justify-start gap-2 py-2 sm:gap-3 sm:py-3 lg:gap-3 lg:py-2">
               <div className="shrink-0 text-center">
               <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-[11px] font-semibold text-cyan-700 dark:border-cyan-400/20 dark:bg-cyan-400/10 dark:text-cyan-200 sm:px-4 sm:text-xs">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" /> {t("comic.superAgent")}
@@ -1672,16 +1685,16 @@ export function AgentWorkspace({ code }: { code: string }) {
                 {project ? <ComicProjectPanel project={project} /> : null}
                 {!project && <section className="soft-input overflow-hidden">
                   <div className="border-b border-gray-50 px-3 py-2 dark:border-white/10 sm:px-4">
-                    <div className="scroll-x-only grid grid-cols-[1fr_auto_1fr] items-center gap-2 overflow-x-auto">
-                      <button type="button" onClick={() => void openComicImageLibrary("references")} className="flex h-9 shrink-0 items-center gap-2 justify-self-start rounded-xl border border-gray-100 bg-gray-50 px-3 text-xs font-medium text-gray-600 transition hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10">
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[1fr_auto_1fr]">
+                      <button type="button" onClick={() => void openComicImageLibrary("references")} className="col-start-1 row-start-1 flex h-9 shrink-0 items-center gap-2 justify-self-start rounded-xl border border-gray-100 bg-gray-50 px-3 text-xs font-medium text-gray-600 transition hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10">
                         <Folder size={15} />{t("asset.library")}
                         {currentComicReferences().length > 0 ? <span className="rounded-full bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-600 dark:text-cyan-200">{currentComicReferences().length}</span> : null}
                       </button>
-                      <label title={ts("输入是已有剧本／原文：按原文定位分镜，保留来源供核对")} className={"flex h-9 shrink-0 cursor-pointer items-center gap-2 justify-self-center rounded-xl border px-3 text-xs font-medium transition " + (comicSourceMode ? "border-cyan-300 bg-cyan-50 text-cyan-700 dark:border-cyan-400/30 dark:bg-cyan-400/10 dark:text-cyan-200" : "border-gray-100 bg-gray-50 text-gray-600 hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10")}>
-                        <input aria-label={ts("输入是已有剧本／原文：按原文定位分镜，保留来源供核对")} type="checkbox" checked={comicSourceMode} onChange={(e) => setComicSourceMode(e.target.checked)} className="h-3.5 w-3.5 accent-cyan-500" />
-                        <span className="whitespace-nowrap">{ts("输入是已有剧本／原文：按原文定位分镜，保留来源供核对")}</span>
+                      <label title={ts("输入是已有剧本／原文：按原文定位分镜，保留来源供核对")} className={"col-span-2 row-start-2 flex min-h-9 min-w-0 cursor-pointer items-center gap-2 rounded-xl border px-3 py-1.5 text-xs font-medium transition sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:justify-self-center " + (comicSourceMode ? "border-cyan-300 bg-cyan-50 text-cyan-700 dark:border-cyan-400/30 dark:bg-cyan-400/10 dark:text-cyan-200" : "border-gray-100 bg-gray-50 text-gray-600 hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10")}>
+                        <input aria-label={ts("输入是已有剧本／原文：按原文定位分镜，保留来源供核对")} type="checkbox" checked={comicSourceMode} onChange={(e) => setComicSourceMode(e.target.checked)} className="h-3.5 w-3.5 shrink-0 accent-cyan-500" />
+                        <span className="min-w-0 leading-4 sm:whitespace-nowrap">{ts("输入是已有剧本／原文：按原文定位分镜，保留来源供核对")}</span>
                       </label>
-                      <button type="button" onClick={() => setHelpOpen(true)} className="flex h-9 shrink-0 items-center gap-2 justify-self-end rounded-xl border border-gray-100 bg-gray-50 px-3 text-xs font-medium text-gray-600 transition hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10">
+                      <button type="button" onClick={() => setHelpOpen(true)} className="col-start-2 row-start-1 flex h-9 shrink-0 items-center gap-2 justify-self-end rounded-xl border border-gray-100 bg-gray-50 px-3 text-xs font-medium text-gray-600 transition hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10 sm:col-start-3">
                         <HelpCircle size={15} />{t("agent.help")}
                       </button>
                     </div>
@@ -1693,7 +1706,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                         <input type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" disabled={uploading} onChange={(e) => { void handleComicUploads(e.target.files); e.currentTarget.value = ""; }} />
                       </label>
                     </div>
-					<textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={t("comic.videoPlaceholder")} className="min-h-[68px] flex-1 resize-none bg-transparent text-sm leading-6 text-gray-700 outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500 sm:min-h-[86px]" />
+					<textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={t("comic.videoPlaceholder")} className="min-h-[68px] min-w-0 flex-1 resize-none bg-transparent text-sm leading-6 text-gray-700 outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500 sm:min-h-[86px]" />
                     <button onClick={run} disabled={submitting} className="mt-auto flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-cyan-500 text-white shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400 disabled:opacity-40">
                       {submitting ? <Loader2 size={18} className="animate-spin" /> : <ArrowUp size={18} />}
                     </button>
@@ -1840,7 +1853,7 @@ export function AgentWorkspace({ code }: { code: string }) {
             onChanged={() => loadComicAssets(activeComicProject.public_id)}
           />
         )}
-        <SystemAssetLibraryDialog
+        {comicLibraryTarget && <SystemAssetLibraryDialog
           open={!!comicLibraryTarget}
           kind="image"
           title={ts("从资产库选择图片")}
@@ -1849,7 +1862,7 @@ export function AgentWorkspace({ code }: { code: string }) {
           maxSelected={comicLibraryTarget === "references" ? 8 : 1}
           onClose={() => setComicLibraryTarget(null)}
           onConfirm={confirmComicLibrary}
-        />
+        />}
         {helpOpen && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onClick={() => setHelpOpen(false)}>
             <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-5 shadow-2xl dark:border-white/10 dark:bg-gray-900" onClick={(event) => event.stopPropagation()}>
@@ -2453,7 +2466,7 @@ function ComicFeatureHero({ features, activeIndex, onSelect }: { features: Displ
         <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-cyan-500/10 text-2xl text-cyan-600 transition duration-300 group-hover:rotate-3 group-hover:scale-110 dark:text-cyan-200 sm:h-14 sm:w-14 lg:h-16 lg:w-16">
           {item.icon || "•"}
         </div>
-        <div>
+        <div className="min-w-0">
           <h2 title={item.title} className="line-clamp-2 text-lg font-black tracking-normal text-gray-900 dark:text-white sm:text-xl lg:text-2xl">{item.title}</h2>
           {item.subtitle ? <p title={item.subtitle} className="mt-2 line-clamp-3 max-w-[460px] text-xs leading-6 text-gray-500 dark:text-gray-300 sm:text-sm lg:mt-4 lg:leading-7">{item.subtitle}</p> : null}
           {item.tags?.length ? <div className="mt-3 flex flex-wrap gap-2 lg:mt-5">
@@ -2719,7 +2732,7 @@ function ComicAssetModal({ projectId, items, onClose, onChanged }: { projectId: 
           </div>
         </div>
       </div>
-      <SystemAssetLibraryDialog open={libraryOpen} kind="image" title={ts("选择资产参考图")} description={ts("可多选，最多 8 张")} selected={assetReferences} maxSelected={8} onClose={() => setLibraryOpen(false)} onConfirm={(selected) => { setReferences(selected.map((item) => ({ url: item.url, name: item.name, public_id: item.public_id }))); setLibraryOpen(false); }} />
+      {libraryOpen && <SystemAssetLibraryDialog open={libraryOpen} kind="image" title={ts("选择资产参考图")} description={ts("可多选，最多 8 张")} selected={assetReferences} maxSelected={8} onClose={() => setLibraryOpen(false)} onConfirm={(selected) => { setReferences(selected.map((item) => ({ url: item.url, name: item.name, public_id: item.public_id }))); setLibraryOpen(false); }} />}
     </div>
   );
 }

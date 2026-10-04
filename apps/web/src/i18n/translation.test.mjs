@@ -31,6 +31,45 @@ test("every locale covers canonical keys and preserves named variables", () => {
   }
 });
 
+test("entry-page, navigation and login strings are localized rather than copied English placeholders", () => {
+  for (const [locale, dictionary] of Object.entries({ ja, ko, vi })) {
+    for (const key of Object.keys(zh).filter((key) => /^(common|landing|nav|login)\./.test(key))) {
+      if (key === "landing.titleSuffix") continue; // {value} must remain an interpolation placeholder.
+      if (locale === "vi" && ["nav.video", "common.video"].includes(key)) continue; // Video is also the Vietnamese loanword.
+      assert.notEqual(dictionary[key], en[key], `English placeholder on ${locale} entry UI: ${key}`);
+    }
+  }
+  assert.equal(ja["common.language"], "言語");
+  assert.equal(ko["common.language"], "언어");
+  assert.equal(vi["common.language"], "Ngôn ngữ");
+});
+
+test("all canonical natural-language keys are localized; shared brands, protocol labels and loanwords stay intact", () => {
+  const shared = {
+    "canvas.story.platform.douyin": "Douyin",
+    "canvas.story.platform.wechat_channels": "WeChat Channels",
+    "canvas.story.platform.xiaohongshu": "Xiaohongshu",
+    "canvas.story.platform.tiktok": "TikTok",
+    "canvas.story.platform.youtube": "YouTube",
+    "customerService.wechat": "WeChat",
+    "apiDocs.baseUrl": "BASE URL",
+    "category.api": "API",
+    "landing.titleSuffix": "{value}",
+  };
+  const vietnameseVideo = new Set(["canvas.kind.video", "nav.video", "common.video", "asset.video", "category.video"]);
+  for (const [locale, dictionary] of Object.entries({ ja, ko, vi })) {
+    for (const [key, value] of Object.entries(shared)) assert.equal(dictionary[key], value, `changed shared ${locale} label: ${key}`);
+    for (const key of Object.keys(zh)) {
+      if (key in shared) continue;
+      if (locale === "vi" && vietnameseVideo.has(key)) {
+        assert.equal(dictionary[key].toLowerCase(), "video");
+        continue;
+      }
+      assert.notEqual(dictionary[key], en[key], `untranslated English ${locale} key: ${key}`);
+    }
+  }
+});
+
 test("source lookup preserves direct, first duplicate and English fallback priorities", () => {
   const dictionaries = { "zh-CN": { first: "原文", second: "原文", other: "其他" }, "en-US": { first: "First", second: "Second", other: "Other" }, "ja-JP": { first: "日本語" } };
   assert.equal(translateBuiltinSource("原文", "ja-JP", dictionaries, {}), "日本語");

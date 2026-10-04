@@ -6,7 +6,6 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, ChevronLeft, Compass, FileText, Home, LayoutGrid, Menu, Search, Settings, WalletCards, X } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
-import { RechargeModal } from "./RechargeModal";
 import { api, apiCached, apiForLocaleCached } from "@/lib/api";
 import type { Model, User, Wallet } from "@starai/shared-types";
 import { clsx } from "clsx";
@@ -33,6 +32,7 @@ const AgentWorkspace = dynamic(() => loadAgentWorkspace().then(module => module.
 const GalleryPanel = dynamic(() => import("./workbench/GalleryPanel").then(module => module.GalleryPanel), { loading: WorkspaceLoading });
 const InfiniteCanvasWorkspace = dynamic(() => loadInfiniteCanvasWorkspace().then(module => module.InfiniteCanvasWorkspace), { loading: WorkspaceLoading });
 const CreativeAgentWorkspace = dynamic(() => loadCreativeAgentWorkspace().then(module => module.CreativeAgentWorkspace), { loading: WorkspaceLoading });
+const RechargeModal = dynamic(() => import("./RechargeModal").then(module => module.RechargeModal));
 
 const PRIMARY_NAV = [
   { id: "models", label: "大模型", icon: LayoutGrid },
@@ -1021,11 +1021,11 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode, initi
           </main>
         </div>
         <Drawer />
-        <RechargeModal
+        {showRecharge && <RechargeModal
           open={showRecharge}
           onClose={() => setShowRecharge(false)}
           onSuccess={() => api<Wallet>("/api/wallet").then(setWallet)}
-        />
+        />}
       </div>
     );
   }
@@ -1190,11 +1190,11 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode, initi
         )}
       </main>
 
-      <RechargeModal
+      {showRecharge && <RechargeModal
         open={showRecharge}
         onClose={() => setShowRecharge(false)}
         onSuccess={() => api<Wallet>("/api/wallet").then(setWallet)}
-      />
+      />}
     </div>
   );
 }

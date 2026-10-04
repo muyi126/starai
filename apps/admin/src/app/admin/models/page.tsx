@@ -1,12 +1,17 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { createPortal } from "react-dom";
 import { adminApi, adminUploadFile } from "@/lib/api";
-import { UpstreamIncludeEditor } from "@/components/UpstreamIncludeEditor";
 import { AdminPagination } from "@/components/AdminPagination";
-import { ModelRoutesEditor } from "@/components/ModelRoutesEditor";
 import { imageInterfaceType, withImageInterfaceType } from "@/lib/image-interface";
+import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, clearMediaTemplateRuntime, clearTemplateConnection } from "@/lib/multimedia-templates";
+
+const UpstreamIncludeEditor = dynamic(() => import("@/components/UpstreamIncludeEditor").then(module => module.UpstreamIncludeEditor));
+const ModelRoutesEditor = dynamic(() => import("@/components/ModelRoutesEditor").then(module => module.ModelRoutesEditor), {
+  loading: () => <div role="status" className="col-span-2 py-4 text-sm text-gray-500">正在加载线路编辑器…</div>,
+});
 
 interface AdminModel {
   id: number;
@@ -69,7 +74,8 @@ const MINIMAX_H3_MAX_TEMPLATE_KEY = "minimax_h3_max_v2";
 const VEO_REFERENCE_TEMPLATE_KEY = "veo_reference_v1";
 const VEO_FRAME_PAIR_TEMPLATE_KEY = "veo_frame_pair_v1";
 const OMNI_REFERENCE_TEMPLATE_KEY = "omni_reference_v1";
-const DOLA_SEEDANCE_TEMPLATE_KEY = "dola_seedance_30s";
+const OCTOPUS_SD_MINI_TEMPLATE_KEY = "octopus_sd_mini_v1";
+const DOLA_SEEDANCE_TEMPLATE_KEY = "dola_topenrouter_seedance_2";
 const ALIYUN_QWEN_IMAGE_TEMPLATE_KEY = "aliyun_qwen_image_v3";
 const ALIYUN_HAPPYHORSE_TEMPLATE_KEY = "aliyun_happyhorse";
 type HappyHorseProfile = "text" | "first_frame" | "reference" | "edit";
@@ -114,8 +120,8 @@ function switchedPriceRule(current: Record<string, any>, billingType: ModelBilli
     return {
       billing_type: billingType,
       currency,
-      input_price_per_m: Number(current.input_price_per_m ?? 1) || 1,
-      output_price_per_m: Number(current.output_price_per_m ?? 1) || 1,
+      input_price_per_m: Math.max(0, Number(current.input_price_per_m ?? Number(current.input_price ?? 0) * 1_000_000) || 0),
+      output_price_per_m: Math.max(0, Number(current.output_price_per_m ?? Number(current.output_price ?? 0) * 1_000_000) || 0),
     };
   }
   return { billing_type: billingType, currency, unit_price: Math.max(0, Number(current.unit_price ?? 1) || 0) };
@@ -483,6 +489,7 @@ const CHAT_ENDPOINT_BY_PROTOCOL: Record<string, string> = {
 };
 
 const IMAGE_ENDPOINT_PRESETS = [
+  ...MULTIMEDIA_TEMPLATES.filter((item) => item.category === "image"),
   {
     key: ALIYUN_QWEN_IMAGE_TEMPLATE_KEY,
     label: "阿里云百炼 · Qwen-Image 3.0 / Pro",
@@ -745,7 +752,9 @@ export default function ModelsPage() {
       price_rule: JSON.stringify(m.price_rule ?? {}, null, 2),
       runtime_rule: JSON.stringify(m.runtime_rule ?? {}, null, 2),
     });
-    if (m.new_api_endpoint === "/minimax/v1/t2a_v2") {
+    if (MULTIMEDIA_TEMPLATES.some((item) => item.category === "audio" && item.key === m.runtime_rule?.template_key)) {
+      setAudioTemplateKey(String(m.runtime_rule?.template_key));
+    } else if (m.new_api_endpoint === "/minimax/v1/t2a_v2") {
       setAudioTemplateKey("yunwu_minimax_speech");
     } else if (m.new_api_endpoint === "/v1/t2a_v2") {
       setAudioTemplateKey("minimax_official_speech");
@@ -758,7 +767,9 @@ export default function ModelsPage() {
     } else {
       setAudioTemplateKey("");
     }
-    if ((m.runtime_rule as any)?.upstream?.adapter === "dola_seedance_30s") {
+    if (MULTIMEDIA_TEMPLATES.some((item) => item.category === "video" && item.key === m.runtime_rule?.template_key)) {
+      setVideoTemplateKey(String(m.runtime_rule?.template_key));
+    } else if (["dola_seedance_30s", "topenrouter_seedance_2"].includes((m.runtime_rule as any)?.upstream?.adapter)) {
       setVideoTemplateKey(DOLA_SEEDANCE_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "volcengine_seedance_2") {
       const variant = inferSeedanceVariant(m.new_api_model, m.runtime_rule);
@@ -771,6 +782,8 @@ export default function ModelsPage() {
       setVideoTemplateKey(VEO_FRAME_PAIR_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "omni_reference_v1") {
       setVideoTemplateKey(OMNI_REFERENCE_TEMPLATE_KEY);
+    } else if ((m.runtime_rule as any)?.upstream?.adapter === "octopus_sd_mini_v1") {
+      setVideoTemplateKey(OCTOPUS_SD_MINI_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "aliyun_video_generation") {
       setVideoTemplateKey(m.new_api_model === "wan3.0-video" ? ALIYUN_WAN3_TEMPLATE_KEY : ALIYUN_HAPPYHORSE_TEMPLATE_KEY);
     } else {
@@ -858,12 +871,7 @@ export default function ModelsPage() {
   };
 
   const clearModelCaps = (runtimeRuleText: string) => {
-    const rr = safeParseJson(runtimeRuleText, {});
-    return JSON.stringify(
-      { ...rr, capabilities: { ...(rr?.capabilities ?? {}), web_search: false, deep_think: false } },
-      null,
-      2
-    );
+    return clearMediaTemplateRuntime(runtimeRuleText);
   };
 
   const getConnection = (extraText: string) => {
@@ -1157,6 +1165,8 @@ export default function ModelsPage() {
   };
 
   const buildImageEndpointPreset = (prev: FormState, presetKey: string): FormState => {
+    if (MULTIMEDIA_TEMPLATES.some((item) => item.key === presetKey)) return applyMultimediaTemplate(prev, presetKey);
+    prev = { ...prev, new_api_extra_params: clearTemplateConnection(prev.new_api_extra_params, prev.runtime_rule) };
     const preset = IMAGE_ENDPOINT_PRESETS.find((x) => x.key === presetKey)!;
     if (preset.key === ALIYUN_QWEN_IMAGE_TEMPLATE_KEY) {
       return applyAliyunQwenImageV3(prev);
@@ -1275,6 +1285,7 @@ export default function ModelsPage() {
 
   const VIDEO_PROFILES = [
     { value: "single_ref", label: "单参考图 (Sora 类)" },
+    { value: "first_frame", label: "仅首帧（NEW API / Grok / Hailuo）" },
     { value: "multi_ref", label: "多参考图 1~N (SD 类)" },
     { value: "frame_pair", label: "首尾帧 + 参考图 (VEO 类)" },
     { value: "veo_frame_pair", label: "VEO 首尾帧 1~2 张（无参考图）" },
@@ -1618,7 +1629,7 @@ export default function ModelsPage() {
           2
         ),
       }),
-      { static: { stream: false }, request_timeout_sec: 900 }
+      { static: { stream: false }, request_timeout_sec: 900, response_map: { output_seconds: "extra_info.audio_length" }, output_seconds_scale: 0.001 }
     ),
     input_schema: JSON.stringify(
       {
@@ -1970,7 +1981,7 @@ export default function ModelsPage() {
           2
         ),
       }),
-      { static: { stream: false }, request_timeout_sec: 900 }
+      { static: { stream: false }, request_timeout_sec: 900, response_map: { output_seconds: "extra_info.audio_length" }, output_seconds_scale: 0.001 }
     ),
     input_schema: JSON.stringify(
       {
@@ -2196,16 +2207,16 @@ export default function ModelsPage() {
     price_rule: JSON.stringify({ billing_type: "per_second", unit_price: 0.08 }, null, 2),
   });
 
-  const applyDolaSeedance30s = (prev: FormState): FormState => ({
+  const applyDolaSeedance2 = (prev: FormState): FormState => ({
     ...prev,
     category: "video",
     request_mode: "video",
-    new_api_model: "dola-seedance-30s",
-    new_api_endpoint: "/api/v1/videos",
+    new_api_model: "doubao-seedance-2.0",
+    new_api_endpoint: "/v1/video/tasks",
     new_api_extra_params: setConnection(prev.new_api_extra_params, {
-      provider: "dola",
+      provider: "topenrouter",
       protocol: "custom_http",
-      base_url: "https://43.254.166.145",
+      base_url: "https://tp-api.chinadatapay.com:8000",
       auth_type: "bearer",
       api_key_header: "Authorization",
       models_endpoint: "",
@@ -2214,40 +2225,56 @@ export default function ModelsPage() {
     }),
     input_schema: JSON.stringify({
       type: "object",
-      required: ["duration", "ratio"],
       properties: {
-        duration: { type: "integer", title: "视频时长", enum: [30], enumLabels: { "30": "30s" }, default: 30, "x-order": 1, "x-widget": "option_menu", "x-icon": "clock", "x-highlight": true },
-        ratio: { type: "string", title: "画面比例", enum: ["16:9", "9:16", "1:1", "3:4", "4:3", "21:9"], default: "16:9", "x-order": 2, "x-widget": "option_menu", "x-icon": "ratio" },
+        generation_mode: {
+          type: "string", title: "素材组合",
+          enum: ["text", "image", "video", "image_audio", "image_video", "video_audio", "image_video_audio", "draft_task"],
+          enumLabels: { text: "纯文本", image: "图片 + 文本", video: "视频 + 文本", image_audio: "图片 + 音频 + 文本", image_video: "图片 + 视频 + 文本", video_audio: "视频 + 音频 + 文本", image_video_audio: "图片 + 视频 + 音频 + 文本", draft_task: "样片任务 ID" },
+          default: "image", "x-order": 1, "x-widget": "option_menu", "x-icon": "sparkles", "x-highlight": true,
+        },
+        generate_audio: { type: "boolean", title: "同步音频", default: true, "x-order": 2, "x-widget": "boolean_toggle", "x-icon": "music", "x-placement": "top" },
+        duration: { type: "integer", title: "视频时长", enum: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], default: 4, "x-order": 3, "x-widget": "option_menu", "x-icon": "clock" },
+        ratio: { type: "string", title: "画面比例", enum: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"], enumLabels: { adaptive: "智能适配" }, default: "9:16", "x-order": 4, "x-widget": "option_menu", "x-icon": "ratio" },
+        resolution: { type: "string", title: "分辨率", enum: ["480p", "720p", "1080p"], default: "720p", "x-order": 5, "x-widget": "option_menu", "x-icon": "4k" },
+        watermark: { type: "boolean", title: "AI 水印", default: false, "x-order": 6, "x-widget": "boolean_toggle", "x-icon": "sparkles", "x-group": "settings" },
+        return_last_frame: { type: "boolean", title: "返回尾帧", default: false, "x-order": 7, "x-widget": "boolean_toggle", "x-icon": "target", "x-group": "settings" },
+        draft: { type: "boolean", title: "样片模式", default: false, "x-order": 8, "x-widget": "boolean_toggle", "x-icon": "wand", "x-group": "settings" },
+        execution_expires_after: { type: "integer", title: "任务有效期", enum: [900, 1800, 3600, 7200], enumLabels: { "900": "15 分钟", "1800": "30 分钟", "3600": "1 小时", "7200": "2 小时" }, default: 3600, "x-order": 9, "x-widget": "option_menu", "x-icon": "clock", "x-group": "settings" },
       },
     }, null, 2),
-    default_params: JSON.stringify({ duration: 30, ratio: "16:9" }, null, 2),
+    default_params: JSON.stringify({ generation_mode: "image", generate_audio: true, duration: 4, ratio: "9:16", resolution: "720p", watermark: false, return_last_frame: false, draft: false, execution_expires_after: 3600, draft_task_id: "" }, null, 2),
     runtime_rule: JSON.stringify({
       video: {
-        upload_profile: "multi_ref",
+        upload_profile: "seedance_2",
+        seedance_variant: "standard",
         min_reference_images: 0,
         max_reference_images: 9,
         max_total_images: 9,
         count_toward_total: true,
-        prompt_required: true,
-        prompt_hint: "输入视频描述，可选上传 1～9 张 JPEG/PNG 参考图；固定生成 30 秒视频",
+        prompt_required: false,
+        prompt_hint: "描述目标视频；可切换素材组合并用“图片1 / 视频1 / 音频1”引用素材",
         show_channel: false,
         show_web_search: false,
         count_options: [1],
         count_allow_custom: false,
         count_max: 1,
+        mode_param: "generation_mode",
         reference_images: { key: "reference_images", max: 9 },
+        reference_videos: { key: "reference_videos", max: 3 },
+        reference_audios: { key: "reference_audios", max: 3 },
       },
       upstream: {
-        adapter: "dola_seedance_30s",
-        include: ["duration", "ratio", "reference_images"],
-        poll_path: "/api/v1/videos/{id}",
+        adapter: "topenrouter_seedance_2",
+        include: ["generation_mode", "generate_audio", "duration", "ratio", "resolution", "watermark", "return_last_frame", "draft", "execution_expires_after", "reference_images", "reference_videos", "reference_audios", "portrait_asset_id", "portrait_asset_type", "draft_task_id"],
+        map: {},
+        poll_path: "/v1/video/tasks/{id}",
         poll_interval_sec: 10,
-        poll_timeout_sec: 1800,
-        request_timeout_sec: 300,
+        poll_timeout_sec: 7200,
+        request_timeout_sec: 120,
       },
       capabilities: { web_search: false, deep_think: false },
     }, null, 2),
-    price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
+    price_rule: JSON.stringify(buildSeedancePriceRule("standard"), null, 2),
   });
 
   const aliyunVideoConnection = (extra: string) => setConnection(extra, {
@@ -2605,6 +2632,34 @@ export default function ModelsPage() {
     ),
     price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
   });
+
+  const applyOctopusSDMiniV1 = (prev: FormState): FormState => {
+    const base = applyOmniReferenceV1(prev);
+    const inputSchema = JSON.parse(base.input_schema);
+    inputSchema.properties.duration = {
+      ...inputSchema.properties.duration,
+      enum: [5, 10, 15],
+      enumLabels: { "5": "5s", "10": "10s", "15": "15s" },
+      default: 10,
+    };
+    inputSchema.properties.size = {
+      ...inputSchema.properties.size,
+      enumLabels: { "1280x720": "横屏", "720x1280": "竖屏" },
+    };
+    const runtimeRule = JSON.parse(base.runtime_rule);
+    runtimeRule.upstream = {
+      ...runtimeRule.upstream,
+      adapter: "octopus_sd_mini_v1",
+      include: ["generation_mode", "duration", "size", "reference_images"],
+    };
+    return {
+      ...base,
+      new_api_model: "seedance-2.0-mini-480p",
+      input_schema: JSON.stringify(inputSchema, null, 2),
+      default_params: JSON.stringify({ generation_mode: "text", duration: 10, size: "1280x720" }, null, 2),
+      runtime_rule: JSON.stringify(runtimeRule, null, 2),
+    };
+  };
 
   const applyVolcengineSeedance2 = (prev: FormState, variant: SeedanceVariant): FormState => {
     const config = getSeedanceVariantConfig(variant);
@@ -3253,8 +3308,10 @@ export default function ModelsPage() {
       };
       runtimeRule = parsedRuntimeRule;
     }
+    const isOctopusSDMini = parsedRuntimeRule?.upstream?.adapter === "octopus_sd_mini_v1";
     const isOmniReference =
       form.category === "video" &&
+      !isOctopusSDMini &&
       (parsedRuntimeRule?.upstream?.adapter === "omni_reference_v1" ||
         parsedRuntimeRule?.video?.upload_profile === "omni_reference");
     if (isOmniReference) {
@@ -3340,7 +3397,7 @@ export default function ModelsPage() {
       };
       runtimeRule = parsedRuntimeRule;
     }
-    if (isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference) {
+    if (isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference || isOctopusSDMini) {
       const modeParam = String(parsedRuntimeRule?.video?.mode_param || "generation_mode");
       const modeSchema = parsedInputSchema?.properties?.[modeParam] as Record<string, any> | undefined;
       const schemaDefault = modeSchema?.default;
@@ -3967,6 +4024,7 @@ export default function ModelsPage() {
                   onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { auth_type: e.target.value }) }))}
                 >
                   <option value="bearer">Bearer Token</option>
+                  <option value="token">Token（Vidu 原生）</option>
                   <option value="api_key_header">自定义 Header</option>
                   <option value="none">不鉴权</option>
                 </select>
@@ -4380,8 +4438,6 @@ export default function ModelsPage() {
                 className="w-full mt-1 px-3 py-2 rounded-lg border text-sm"
                 value={form.new_api_endpoint}
                 onChange={(e) => {
-                  if (form.category === "audio") setAudioTemplateKey("");
-                  if (form.category === "video") setVideoTemplateKey("");
                   setForm({ ...form, new_api_endpoint: e.target.value });
                 }}
               />
@@ -4442,6 +4498,14 @@ export default function ModelsPage() {
                     ))}
                     <option value="custom">自定义（保留当前配置）</option>
                   </select>
+                  {MULTIMEDIA_TEMPLATES.find((item) => item.key === imagePresetKey()) && <p className="mt-2 text-xs leading-5 text-gray-600">{MULTIMEDIA_TEMPLATES.find((item) => item.key === imagePresetKey())?.description} 新兼容模板售价为 0，请配置售价与线路成本后启用。</p>}
+                  {MULTIMEDIA_TEMPLATES.some((item) => item.key === imagePresetKey()) && <div className="mt-3 rounded-xl border border-cyan-200 bg-cyan-50/50 p-3">
+                    <label className="text-xs text-gray-500">用户售价计费方式<select className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm" value={videoBillingType} onChange={(e) => setVideoBillingType(e.target.value as ModelBillingType)}><option value="per_image">按张</option><option value="per_request">按次</option><option value="per_token">按 Token</option><option value="per_second">按秒（需上游时长用量）</option></select></label>
+                    <div className="mt-3 flex flex-wrap gap-3">{videoBillingType === "per_token" ? <>
+                      <SeedancePriceInput label="输入算力 / 1M Token" value={Number(currentPriceRule.input_price_per_m ?? 0)} step={0.01} onChange={(value) => setVideoPriceValue("input_price_per_m", value)} />
+                      <SeedancePriceInput label="输出算力 / 1M Token" value={Number(currentPriceRule.output_price_per_m ?? 0)} step={0.01} onChange={(value) => setVideoPriceValue("output_price_per_m", value)} />
+                    </> : <SeedancePriceInput label={videoBillingType === "per_request" ? "每次算力" : videoBillingType === "per_second" ? "每秒算力" : "每张算力"} value={Number(currentPriceRule.unit_price ?? 0)} step={0.01} onChange={(value) => setVideoPriceValue("unit_price", value)} />}</div>
+                  </div>}
                 </div>
                 <div>
                   <label className="text-xs text-gray-500">上游模型</label>
@@ -4736,11 +4800,16 @@ export default function ModelsPage() {
                       onChange={(e) => {
                         const value = e.target.value;
                         setVideoTemplateKey(value);
+                        if (MULTIMEDIA_TEMPLATES.some((item) => item.key === value)) {
+                          setForm((prev) => applyMultimediaTemplate(prev, value));
+                          return;
+                        }
+                        if (value) setForm((prev) => ({ ...prev, new_api_extra_params: clearTemplateConnection(prev.new_api_extra_params, prev.runtime_rule) }));
                         const variant = getSeedanceVariantByTemplateKey(value);
                         if (variant) {
                           setForm((prev) => applyVolcengineSeedance2(prev, variant));
                         } else if (value === DOLA_SEEDANCE_TEMPLATE_KEY) {
-                          setForm((prev) => applyDolaSeedance30s(prev));
+                          setForm((prev) => applyDolaSeedance2(prev));
                         } else if (value === MINIMAX_H3_TEMPLATE_KEY) {
                           setForm((prev) => applyMiniMaxH3V2(prev));
                         } else if (value === MINIMAX_H3_MAX_TEMPLATE_KEY) {
@@ -4751,6 +4820,8 @@ export default function ModelsPage() {
                           setForm((prev) => applyVeoFramePairV1(prev));
                         } else if (value === OMNI_REFERENCE_TEMPLATE_KEY) {
                           setForm((prev) => applyOmniReferenceV1(prev));
+                        } else if (value === OCTOPUS_SD_MINI_TEMPLATE_KEY) {
+                          setForm((prev) => applyOctopusSDMiniV1(prev));
                         } else if (value === ALIYUN_HAPPYHORSE_TEMPLATE_KEY) {
                           setForm((prev) => applyAliyunHappyHorse(prev, "text"));
                         } else if (value === ALIYUN_WAN3_TEMPLATE_KEY) {
@@ -4759,10 +4830,12 @@ export default function ModelsPage() {
                       }}
                     >
                       <option value="">通用视频接口 / 自定义配置</option>
+                      {MULTIMEDIA_TEMPLATES.filter((item) => item.category === "video").map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
                       <option value={VEO_FRAME_PAIR_TEMPLATE_KEY}>章鱼哥 · VEO 首尾帧（无参考图）</option>
                       <option value={VEO_REFERENCE_TEMPLATE_KEY}>第三方 OpenAI 兼容 · 参考图（VEO 类）</option>
                       <option value={OMNI_REFERENCE_TEMPLATE_KEY}>章鱼哥 · Omni 文生 / 参考图</option>
-                      <option value={DOLA_SEEDANCE_TEMPLATE_KEY}>Dola · Seedance 30 秒视频</option>
+                      <option value={OCTOPUS_SD_MINI_TEMPLATE_KEY}>章鱼哥SD-mini</option>
+                      <option value={DOLA_SEEDANCE_TEMPLATE_KEY}>Dola · TopenRouter Seedance 2.0</option>
                       <option value={SEEDANCE_VARIANTS.standard.templateKey}>火山方舟 · Doubao Seedance 2.0 Standard</option>
                       <option value={SEEDANCE_VARIANTS.fast.templateKey}>火山方舟 · Doubao Seedance 2.0 Fast</option>
                       <option value={SEEDANCE_VARIANTS.mini.templateKey}>火山方舟 · Doubao Seedance 2.0 Mini</option>
@@ -4771,24 +4844,29 @@ export default function ModelsPage() {
                       <option value={ALIYUN_HAPPYHORSE_TEMPLATE_KEY}>阿里云百炼 · HappyHorse 全场景</option>
                       <option value={ALIYUN_WAN3_TEMPLATE_KEY}>阿里云百炼 · Wan 3.0 全能视频</option>
                     </select>
-                    {(getSeedanceVariantByTemplateKey(videoTemplateKey) ||
+                    {(MULTIMEDIA_TEMPLATES.some((item) => item.key === videoTemplateKey) || getSeedanceVariantByTemplateKey(videoTemplateKey) ||
                       videoTemplateKey === DOLA_SEEDANCE_TEMPLATE_KEY ||
                       videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY ||
                       videoTemplateKey === MINIMAX_H3_MAX_TEMPLATE_KEY ||
                       videoTemplateKey === VEO_FRAME_PAIR_TEMPLATE_KEY ||
                       videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY ||
                       videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY ||
+                      videoTemplateKey === OCTOPUS_SD_MINI_TEMPLATE_KEY ||
                       videoTemplateKey === ALIYUN_HAPPYHORSE_TEMPLATE_KEY ||
                       videoTemplateKey === ALIYUN_WAN3_TEMPLATE_KEY) && (
                       <button
                         type="button"
                         className="shrink-0 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-xs font-medium text-cyan-700 hover:bg-cyan-50"
                         onClick={() => {
+                          if (MULTIMEDIA_TEMPLATES.some((item) => item.key === videoTemplateKey)) {
+                            setForm((prev) => applyMultimediaTemplate(prev, videoTemplateKey));
+                            return;
+                          }
                           const variant = getSeedanceVariantByTemplateKey(videoTemplateKey);
                           if (variant) {
                             setForm((prev) => applyVolcengineSeedance2(prev, variant));
                           } else if (videoTemplateKey === DOLA_SEEDANCE_TEMPLATE_KEY) {
-                            setForm((prev) => applyDolaSeedance30s(prev));
+                            setForm((prev) => applyDolaSeedance2(prev));
                           } else if (videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY) {
                             setForm((prev) => applyMiniMaxH3V2(prev));
                           } else if (videoTemplateKey === MINIMAX_H3_MAX_TEMPLATE_KEY) {
@@ -4799,6 +4877,8 @@ export default function ModelsPage() {
                             setForm((prev) => applyVeoFramePairV1(prev));
                           } else if (videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) {
                             setForm((prev) => applyOmniReferenceV1(prev));
+                          } else if (videoTemplateKey === OCTOPUS_SD_MINI_TEMPLATE_KEY) {
+                            setForm((prev) => applyOctopusSDMiniV1(prev));
                           } else if (videoTemplateKey === ALIYUN_HAPPYHORSE_TEMPLATE_KEY) {
                             const profile = String(getVideoRule(form.runtime_rule).upload_profile).replace("aliyun_happyhorse_", "") as HappyHorseProfile;
                             setForm((prev) => applyAliyunHappyHorse(prev, ["text", "first_frame", "reference", "edit"].includes(profile) ? profile : "text"));
@@ -4811,8 +4891,9 @@ export default function ModelsPage() {
                       </button>
                     )}
                   </div>
+                  {MULTIMEDIA_TEMPLATES.find((item) => item.key === videoTemplateKey) && <p className="mt-2 text-xs leading-5 text-gray-600">{MULTIMEDIA_TEMPLATES.find((item) => item.key === videoTemplateKey)?.description} 新兼容模板价格初始化为 0，请配置售价与线路成本后启用。</p>}
                   <div className="mt-2 text-[11px] leading-5 text-gray-500">
-                    Dola 模板固定 30 秒，支持文生和 1～9 张 JPEG/PNG 参考图，通过 multipart 接口提交。VEO 首尾帧模板默认使用当前更通用的 veo_3_1-fl，只接收 1 张首帧或“首帧 + 尾帧”，不提供参考图槽位；VEO 参考图模板则固定显示 8 秒，支持文生和 1～3 张参考图。Omni 模板固定 10 秒 720P，支持文生和 1～7 张参考图。三者的 JSON 图片都会自动映射到 images，固定时长不发送上游。Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 支持 768P/2K、4～15 秒及五种素材组合；H3-Max 支持 480P/768P、5～15 秒及文生/首尾帧模式。API Key 仍需管理员填写。
+                    Dola · TopenRouter 模板使用 doubao-seedance-2.0 JSON 任务接口，支持文本、图片、视频、音频和样片任务 ID，并提供时长、比例、分辨率、同步音频、水印、尾帧及样片模式按钮。VEO 首尾帧模板默认使用当前更通用的 veo_3_1-fl，只接收 1 张首帧或“首帧 + 尾帧”，不提供参考图槽位；VEO 参考图模板则固定显示 8 秒，支持文生和 1～3 张参考图。Omni 模板固定 10 秒 720P，支持文生和 1～7 张参考图。章鱼哥SD-mini 固定 480P，支持 5/10/15 秒和横竖屏，不显示质量档。Seedance 三个火山模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 支持 768P/2K、4～15 秒及五种素材组合；H3-Max 支持 480P/768P、5～15 秒及文生/首尾帧模式。API Key 仍需管理员填写。
                   </div>
                 </div>
                 <div className="rounded-xl border border-cyan-200 bg-cyan-50/50 p-4">
@@ -5212,6 +5293,21 @@ export default function ModelsPage() {
                 <div className="text-xs text-gray-500">
                   音频模型通过 runtime_rule.audio 驱动输入区布局与计费展示；input_schema 定义底部参数条（x-widget / x-order / x-icon）。
                 </div>
+                <div className="rounded-xl border border-cyan-200 bg-cyan-50/50 p-4">
+                  <div className="flex flex-wrap items-end gap-3">
+                    <label className="min-w-[180px] flex-1 text-xs text-gray-500">用户售价计费方式
+                      <select className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm" value={videoBillingType} onChange={(e) => setVideoBillingType(e.target.value as ModelBillingType)}>
+                        <option value="per_request">按次</option><option value="per_second">按秒</option><option value="per_token">按 Token</option>
+                        <option value="dynamic">动态规则（高级 JSON）</option>
+                      </select>
+                    </label>
+                    {videoBillingType === "per_token" ? <>
+                      <SeedancePriceInput label="输入算力 / 1M Token" value={Number(currentPriceRule.input_price_per_m ?? 0)} step={0.01} onChange={(value) => setVideoPriceValue("input_price_per_m", value)} />
+                      <SeedancePriceInput label="输出算力 / 1M Token" value={Number(currentPriceRule.output_price_per_m ?? 0)} step={0.01} onChange={(value) => setVideoPriceValue("output_price_per_m", value)} />
+                    </> : videoBillingType !== "dynamic" && <SeedancePriceInput label={videoBillingType === "per_second" ? "每秒算力" : "每次算力"} value={Number(currentPriceRule.unit_price ?? 0)} step={0.01} onChange={(value) => setVideoPriceValue("unit_price", value)} />}
+                  </div>
+                  <p className="mt-2 text-[11px] leading-5 text-gray-500">计费使用 price_rule，展示偏好不会修改售价。按秒优先使用网关真实时长，缺失时测量生成产物，不可测时估算；按 Token 需真实用量，缺失时按已配置的估价规则结算。</p>
+                </div>
                 <div>
                   <label className="text-xs text-gray-500">上游接口模板</label>
                   <select
@@ -5222,6 +5318,8 @@ export default function ModelsPage() {
                       setAudioTemplateKey(value);
                       if (!value) return;
                       setForm((prev) => {
+                        if (MULTIMEDIA_TEMPLATES.some((item) => item.key === value)) return applyMultimediaTemplate(prev, value);
+                        prev = { ...prev, new_api_extra_params: clearTemplateConnection(prev.new_api_extra_params, prev.runtime_rule) };
                         switch (value) {
                           case "yunwu_minimax_speech":
                             return applyAudioYunwuMinimaxSpeechStandard(prev);
@@ -5249,6 +5347,7 @@ export default function ModelsPage() {
                   >
                     <option value="">选择模板后自动填充配置...</option>
                     <option disabled>单文本框（TTS / 克隆）</option>
+                    {MULTIMEDIA_TEMPLATES.filter((item) => item.category === "audio").map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
                     <option value="yunwu_minimax_speech">云雾 API MiniMax Speech 2.8 HD（/minimax/v1/t2a_v2）</option>
                     <option value="minimax_official_speech">MiniMax 官方 Speech 2.8（api.minimax.cn/v1/t2a_v2）</option>
                     <option value="minimax_official_tts">MiniMax / 海螺旧版兼容网关（/v1/audio/speech）</option>
@@ -5262,6 +5361,7 @@ export default function ModelsPage() {
                   </select>
                   <div className="text-[11px] text-gray-400 mt-1">
                     模板会覆盖 endpoint、input_schema、default_params、runtime_rule；连接密钥仍在 new_api_extra_params.connection 中单独配置。
+                    {MULTIMEDIA_TEMPLATES.find((item) => item.key === audioTemplateKey)?.description} 新兼容模板售价为 0，请配置售价与线路成本后启用。
                   </div>
                   {audioTemplateKey === "minimax_official_music" && (
                     <div className="text-[11px] text-amber-600 mt-1">
@@ -5293,39 +5393,15 @@ export default function ModelsPage() {
                       value={getAudioRule(form.runtime_rule).billing_hint}
                       onChange={(e) =>
                         setForm((prev) => {
-                          const billingHint = e.target.value as "per_token" | "estimated";
-                          const price = safeParseJson(prev.price_rule, {}) || {};
-                          const inputPrice = Number(price.input_price ?? 0);
-                          const outputPrice = Number(price.output_price ?? 0);
-                          const nextPrice =
-                            billingHint === "estimated"
-                              ? {
-                                  ...price,
-                                  billing_type: "per_request",
-                                  currency: price.currency || "¥",
-                                  unit_price: Number(price.unit_price ?? 0.01) || 0.01,
-                                }
-                              : {
-                                  ...price,
-                                  billing_type: "per_token",
-                                  currency: price.currency || "¥",
-                                  input_price_per_m: Number(price.input_price_per_m ?? (inputPrice > 0 ? inputPrice * 1_000_000 : 2)) || 0,
-                                  output_price_per_m: Number(price.output_price_per_m ?? (outputPrice > 0 ? outputPrice * 1_000_000 : 4)) || 0,
-                                };
-                          delete (nextPrice as Record<string, unknown>).input_price;
-                          delete (nextPrice as Record<string, unknown>).output_price;
                           return {
                             ...prev,
-                            runtime_rule: setAudioRule(prev.runtime_rule, {
-                              billing_hint: billingHint,
-                            }),
-                            price_rule: JSON.stringify(nextPrice, null, 2),
+                            runtime_rule: setAudioRule(prev.runtime_rule, { billing_hint: e.target.value as "per_token" | "estimated" }),
                           };
                         })
                       }
                     >
-                      <option value="per_token">按token计费</option>
-                      <option value="estimated">预计 ⚡ x.xx/次</option>
+                      <option value="per_token">显示计费方式（跟随售价）</option>
+                      <option value="estimated">显示本次预计消耗</option>
                     </select>
                   </div>
                 </div>

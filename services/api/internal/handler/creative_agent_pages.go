@@ -282,8 +282,9 @@ func creativeDocumentPages(source, brief string) ([]creativeDocumentPage, string
 
 func creativeDocumentRequestedPageCount(brief string) (int, bool) {
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`(?:总共|一共|共|只要|仅要|只生成|只做|制作|生成|规划成|规划为|规划到|改成|改为|改到|换成|换到|调整为|调整到|缩减到|缩减成|压缩到|压缩成|减少到|减少为|合并为|控制在)\s*([0-9]+|[零一二两三四五六七八九十百壹贰貳叁參肆伍陆陸柒捌玖拾佰兩]{1,4})\s*(?:张|页)`),
+		regexp.MustCompile(`(?:总共|一共|共|只要|仅要|只生成|只做|制作|生成|规划成|规划为|规划到|改成|改为|改到|换成|换到|调整为|调整到|缩减到|缩减成|压缩到|压缩成|减少到|减少为|合并为|控制在|还是)\s*([0-9]+|[零一二两三四五六七八九十百壹贰貳叁參肆伍陆陸柒捌玖拾佰兩]{1,4})\s*(?:张|页)`),
 		regexp.MustCompile(`(?m)^(?:本轮要求[:：]\s*)?([0-9]+|[零一二两三四五六七八九十百壹贰貳叁參肆伍陆陸柒捌玖拾佰兩]{1,4})\s*(?:张|页)[。！!\s]*$`),
+		regexp.MustCompile(`([0-9]+|[零一二两三四五六七八九十百壹贰貳叁參肆伍陆陸柒捌玖拾佰兩]{1,4})\s*(?:张|页)(?:就好|即可|够了|吧)`),
 	}
 	start, value := -1, 0
 	for _, pattern := range patterns {

@@ -13,7 +13,8 @@ const noStoreHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
+  ...(process.env.NEXT_DISABLE_STANDALONE === "1" ? {} : { output: "standalone" as const }),
   transpilePackages: ["@starai/shared-types"],
   ...(adminAssetPrefix ? { assetPrefix: adminAssetPrefix } : {}),
   async headers() {
