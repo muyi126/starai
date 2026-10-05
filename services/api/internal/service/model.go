@@ -1614,7 +1614,7 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 	if err := s.ensureDefaultAPIDoc(ctx, id, input); err != nil {
 		log.Printf("ensure default API doc for model %s failed: %v", input.Code, err)
 	}
-	return s.GetByID(ctx, id)
+	return s.SetEnabled(ctx, id, input.IsEnabled)
 }
 
 func (s *ModelService) ensureDefaultAPIDoc(ctx context.Context, modelID int64, input CreateModelInput) error {
@@ -1628,23 +1628,32 @@ func (s *ModelService) ensureDefaultAPIDoc(ctx context.Context, modelID int64, i
 }
 
 func (s *ModelService) SetEnabled(ctx context.Context, id int64, enabled bool) (*ModelDTO, error) {
-	if enabled {
-		var configured, usable bool
-		if err := s.db.QueryRow(ctx, `SELECT
-			EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1),
-			EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1 AND is_enabled=true)`, id).Scan(&configured, &usable); err != nil {
-			return nil, err
-		}
-		if configured && !usable {
-			return nil, errors.New("启用模型前请先启用至少一条上游线路")
-		}
-	}
-	result, err := s.db.Exec(ctx, `UPDATE models SET is_enabled=$1, updated_at=now() WHERE id=$2`, enabled, id)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if result.RowsAffected() == 0 {
-		return nil, errors.New("模型不存在")
+	defer tx.Rollback(ctx)
+	var modelID int64
+	if err := tx.QueryRow(ctx, `SELECT id FROM models WHERE id=$1 FOR UPDATE`, id).Scan(&modelID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("模型不存在")
+		}
+		return nil, err
+	}
+	if enabled {
+		// Disabled legacy/new models can have no enabled routes. Restore only
+		// their primary route; preserve route choices when a usable route exists.
+		if _, err := tx.Exec(ctx, `UPDATE model_routes SET is_enabled=true, updated_at=now()
+			WHERE id=(SELECT id FROM model_routes WHERE model_id=$1 ORDER BY priority,id LIMIT 1)
+			AND NOT EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1 AND is_enabled=true)`, id); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE models SET is_enabled=$1, updated_at=now() WHERE id=$2`, enabled, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return s.GetByID(ctx, id)
 }

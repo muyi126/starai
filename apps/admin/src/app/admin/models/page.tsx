@@ -8,7 +8,10 @@ import { AdminPagination } from "@/components/AdminPagination";
 import { imageInterfaceType, withImageInterfaceType } from "@/lib/image-interface";
 import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, clearMediaTemplateRuntime, clearTemplateConnection } from "@/lib/multimedia-templates";
 
-const UpstreamIncludeEditor = dynamic(() => import("@/components/UpstreamIncludeEditor").then(module => module.UpstreamIncludeEditor));
+// Keep lazy loading inside the form; suspending the page detaches its portal ref.
+const UpstreamIncludeEditor = dynamic(() => import("@/components/UpstreamIncludeEditor").then(module => module.UpstreamIncludeEditor), {
+  loading: () => <div role="status" className="py-4 text-sm text-gray-500">正在加载上游参数编辑器…</div>,
+});
 const ModelRoutesEditor = dynamic(() => import("@/components/ModelRoutesEditor").then(module => module.ModelRoutesEditor), {
   loading: () => <div role="status" className="col-span-2 py-4 text-sm text-gray-500">正在加载线路编辑器…</div>,
 });
@@ -3626,7 +3629,7 @@ export default function ModelsPage() {
         method: "PATCH",
         body: JSON.stringify({ is_enabled: !m.is_enabled }),
       });
-      load();
+      await load();
     } catch (error) {
       setErr(error instanceof Error ? error.message : "切换模型状态失败");
     }
@@ -3950,6 +3953,7 @@ export default function ModelsPage() {
       )}
 
       {/* Filters */}
+      {err && !showForm && <p role="alert" className="mb-4 text-sm text-red-500">{err}</p>}
       <div className="flex flex-wrap items-center gap-3 mb-4">
         <input
           placeholder="搜索编码 / 名称"
