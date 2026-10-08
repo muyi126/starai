@@ -7,19 +7,24 @@ export interface SchemaProp {
   title?: string;
   description?: string;
   placeholder?: string;
-  enum?: (string | number)[];
+  enum?: (string | number | boolean)[];
   "x-enum-labels"?: string[];
   enumLabels?: Record<string, string>;
   default?: unknown;
   minimum?: number;
   maximum?: number;
+  multipleOf?: number;
+  minLength?: number;
+  maxLength?: number;
   widget?: string;
+  "x-widget"?: string;
   "x-placement"?: string;
   "x-order"?: number;
 }
 
 export interface JsonSchema {
   properties?: Record<string, SchemaProp>;
+  required?: string[];
 }
 
 export function schemaProperties(schema: unknown): Record<string, SchemaProp> {
@@ -41,6 +46,12 @@ export function schemaDefaults(schema: unknown): Record<string, unknown> {
 }
 
 function coerce(prop: SchemaProp, raw: string): unknown {
+  const option = prop.enum?.find((value) => String(value) === raw);
+  if (option !== undefined) return option;
+  if (prop.type === "boolean") return raw === "true";
+  if (prop.type === "array" || prop.type === "object") {
+    try { return JSON.parse(raw); } catch { return raw; }
+  }
   if (prop.type === "number" || prop.type === "integer") {
     if (!raw.trim()) return undefined;
     const n = Number(raw);
@@ -103,7 +114,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
       return (
         <input
           type="number"
-          step={prop.type === "integer" ? 1 : "any"}
+          step={prop.multipleOf ?? (prop.type === "integer" ? 1 : "any")}
           value={value === "" ? "" : Number(value)}
           min={prop.minimum}
           max={prop.maximum}
@@ -112,12 +123,14 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
         />
       );
     }
-    if (prop.widget === "textarea") {
+    if ((prop["x-widget"] || prop.widget) === "textarea" || prop.type === "array" || prop.type === "object") {
       return (
         <textarea
-          value={String(value)}
+          value={typeof value === "object" ? JSON.stringify(value, null, 2) : String(value)}
           placeholder={prop.placeholder ? ts(prop.placeholder) : undefined}
-          onChange={(e) => set(key, e.target.value)}
+          minLength={prop.minLength}
+          maxLength={prop.maxLength}
+          onChange={(e) => set(key, coerce(prop, e.target.value))}
           rows={stacked ? 3 : 2}
           className={(stacked ? controlCls : "w-full " + controlCls) + " resize-none"}
         />
@@ -128,6 +141,8 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
         type="text"
         value={String(value)}
         placeholder={prop.placeholder ? ts(prop.placeholder) : undefined}
+        minLength={prop.minLength}
+        maxLength={prop.maxLength}
         onChange={(e) => set(key, e.target.value)}
         className={controlCls}
       />
@@ -151,7 +166,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
   return (
     <div className="flex flex-wrap items-center gap-2">
       {entries.map(([key, prop]) => (
-        <label key={key} className="flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-gray-300">
+        <label key={key} title={prop.description ? ts(prop.description) : undefined} className="flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-gray-300">
           <span className="shrink-0">{ts(prop.title || key)}</span>
           {renderControl(key, prop)}
         </label>

@@ -78,8 +78,8 @@ type MultiCollabSnapshot = {
 
 function defaultImageSizeForConfig(runtimeRule: Model["runtime_rule"], defaultParams: Model["default_params"]) {
   const runtimeQuality = (runtimeRule as any)?.image?.default_quality;
-  const defaultQuality = (defaultParams as any)?.quality ?? (defaultParams as any)?.image_size;
-  return normalizeTier(String(runtimeQuality ?? defaultQuality ?? "1K").toUpperCase());
+  const defaultQuality = (defaultParams as any)?.image_size ?? (defaultParams as any)?.quality;
+  return normalizeTier(String(defaultQuality ?? runtimeQuality ?? "1K").toUpperCase());
 }
 
 function parseMultiCollabSnapshot(content: string): MultiCollabSnapshot | null {
@@ -142,13 +142,14 @@ function sizeBasedVideoSchema(schema: Model["input_schema"], runtimeRule: Model[
   delete properties.aspect_ratio;
   delete properties.orientation;
   delete properties.ratio;
-  const sizes = profile === "omni_reference"
+  const supportedSizes = profile === "omni_reference"
     ? ["1280x720", "720x1280"]
     : ["1280x720", "720x1280", "1920x1080", "1080x1920"];
+  const sizes = Array.isArray(sizeField.enum) ? sizeField.enum.filter((value: string) => supportedSizes.includes(value)) : supportedSizes;
   properties.size = {
     ...sizeField,
     type: "string",
-    title: "视频尺寸",
+    title: sizeField.title ?? "视频尺寸",
     enum: sizes,
     enumLabels: {
       "1280x720": "横屏 720P",
@@ -157,8 +158,8 @@ function sizeBasedVideoSchema(schema: Model["input_schema"], runtimeRule: Model[
       ...(sizeField.enumLabels || {}),
     },
     default: sizes.includes(defaultSize) ? defaultSize : sizes[0],
-    "x-widget": "option_menu",
-    "x-icon": "ratio",
+    "x-widget": sizeField["x-widget"] ?? "option_menu",
+    "x-icon": sizeField["x-icon"] ?? "ratio",
   };
   return { ...source, properties };
 }
@@ -849,9 +850,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const [compactBadge, setCompactBadge] = useState(false);
   const [badgeOpen, setBadgeOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
-  const [imageCount, setImageCount] = useState(1);
-  const [imageRatio, setImageRatio] = useState("1:1");
-  const [imageSize, setImageSize] = useState("1K");
+  const [fallbackImageCount, setImageCount] = useState(1);
+  const [fallbackImageRatio, setImageRatio] = useState("1:1");
+  const [fallbackImageSize, setImageSize] = useState("1K");
   const { languages: generationLanguages, selectedCode: languageCode, setSelectedCode: setLanguageCode, selectedLanguage } = useGenerationLanguages();
   const bottomRef = useRef<HTMLDivElement>(null);
   const mediaPollRef = useRef<(() => void) | null>(null);
@@ -893,11 +894,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     if (!isImage) return {};
     const source = (workbenchInputSchema || {}) as Record<string, any>;
     const properties = { ...schemaProperties(source) };
-    const adapter = String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase();
-    for (const key of ["count", "n", "aspect_ratio", "image_size", "size", "max_reference_images"]) delete properties[key];
-    if (adapter !== "openai_images") delete properties.quality;
+    delete properties.max_reference_images;
     return { ...source, properties };
   }, [isImage, workbenchInputSchema, model.runtime_rule]);
+  const imageProperties = schemaProperties(imageOptionSchema);
+  const imageCount = imageProperties.count || imageProperties.n ? Number(params.count ?? params.n ?? fallbackImageCount) : fallbackImageCount;
+  const imageRatio = imageProperties.aspect_ratio ? String(params.aspect_ratio ?? fallbackImageRatio) : fallbackImageRatio;
+  const imageSize = imageProperties.image_size ? String(params.image_size ?? fallbackImageSize) : fallbackImageSize;
   const hasSchemaFields = Object.keys(schemaProperties(workbenchInputSchema)).length > 0;
   const tag = CATEGORY_TAG[model.category] || { label: model.category, labelKey: `modelCategory.${model.category}`, className: "bg-gray-100 text-gray-600" };
   const modelName = td(`model.${model.code}.name`, model.display_name);
@@ -1048,7 +1051,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     if (initializedParamsKeyRef.current === initializationKey) return;
     initializedParamsKeyRef.current = initializationKey;
     const secondaryKey = parseAudioRuntime(model.runtime_rule).secondary_prompt_key || "style_prompt";
-    const defaults = model.default_params || {};
+    const defaults = { ...schemaDefaultsFromFields(workbenchInputSchema), ...model.default_params };
     setParams({
       ...(isVideo || isAudio
         ? { ...schemaDefaultsFromFields(workbenchInputSchema), ...defaults }
@@ -1089,6 +1092,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         ? {
             ...params,
             ...buildImageGenerationParams({ count: imageCount, ratio: imageRatio, imageSize }),
+            ...(imageProperties.size ? { size: params.size } : {}),
             ...(isAliyunQwenImage ? { aspect_ratio: undefined, image_size: undefined, size: params.size === "auto" ? undefined : params.size } : {}),
             ...languageParams,
             ...(refImages.length ? { reference_images: refImages.map((x) => x.url) } : {}),
@@ -1118,6 +1122,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     isImage,
     isAudio,
     isAliyunQwenImage,
+    imageProperties.size,
     model.runtime_rule,
     imageCount,
     imageRatio,
@@ -1807,6 +1812,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       const imageParams = isImage
         ? {
             ...buildImageGenerationParams({ count: imageCount, ratio: imageRatio, imageSize }),
+            ...(imageProperties.size ? { size: params.size } : {}),
             ...(isAliyunQwenImage ? { aspect_ratio: undefined, image_size: undefined, size: params.size === "auto" ? undefined : params.size } : {}),
             ...buildLanguageParams(selectedLanguage),
             user_prompt: prompt,
@@ -2839,16 +2845,24 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                       imageSize={imageSize}
                       onImageSizeChange={setImageSize}
                       exactSize={isAliyunQwenImage ? String(params.size || "auto") : undefined}
-                      onExactSizeChange={isAliyunQwenImage ? (value) => setParams({ ...params, size: value }) : undefined}
+                      onExactSizeChange={isAliyunQwenImage && !imageProperties.size ? (value) => setParams({ ...params, size: value }) : undefined}
                       countOptions={imageCountOptions}
                       countMax={imageCountMax}
                       countAllowCustom={imageRuntime.count_allow_custom !== false}
+                      showCount={!schemaProperties(imageOptionSchema).count && !schemaProperties(imageOptionSchema).n}
+                      showRatio={!schemaProperties(imageOptionSchema).aspect_ratio && !schemaProperties(imageOptionSchema).size}
                       sizeTiers={imageSizeTiers}
                       ratios={isOpenAIImages ? (["1:1", "3:2", "2:3"] as ImageAspectRatio[]) : imageRatios}
                       allowAutoRatio={imageAllowsAutoRatio}
-                      showSizeTier={!isOpenAIImages && imageRuntime.show_size_tier !== false}
+                      showSizeTier={!schemaProperties(imageOptionSchema).image_size && !schemaProperties(imageOptionSchema).size && !isOpenAIImages && imageRuntime.show_size_tier !== false}
                     />
-                    <VideoOptionToolbar schema={imageOptionSchema} values={params} onChange={setParams} />
+                    <VideoOptionToolbar
+                      schema={imageOptionSchema}
+                      values={params}
+                      videoConfig={{ count_options: imageCountOptions, count_max: imageCountMax, count_allow_custom: imageRuntime.count_allow_custom !== false }}
+                      countUnit={t("unit.image")}
+                      onChange={setParams}
+                    />
                     <GenerationLanguageMenu languages={generationLanguages} value={languageCode} onChange={setLanguageCode} />
                   </>
                 )}

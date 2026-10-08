@@ -6,7 +6,7 @@ import {
   DEFAULT_VIDEO_COUNT_OPTIONS,
   enumLabel,
   isTopPlacementField,
-  parseCountOptions,
+  schemaCountConfig,
   schemaFieldEntries,
   type SchemaFieldMeta,
   type VideoRuntimeConfig,
@@ -73,7 +73,7 @@ const FIELD_DESC_KEY: Record<string, string> = {
 
 function fieldTitle(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta) {
   const i18nKey = FIELD_TITLE_KEY[key];
-  return i18nKey ? t(i18nKey) : ts(typeof prop.title === "string" ? prop.title : key);
+  return prop.title ? ts(prop.title) : i18nKey ? t(i18nKey) : ts(key);
 }
 
 function fieldDesc(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta) {
@@ -86,6 +86,8 @@ function fieldDesc(t: Translate, ts: TranslateSource, key: string, prop: SchemaF
 function optionLabel(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta, value: unknown) {
   const raw = String(value ?? "");
   if (prop.enumLabels?.[raw]) return ts(prop.enumLabels[raw]);
+  const label = enumLabel(prop, value);
+  if (label !== raw) return ts(label);
   const lookup = `video.option.${key}.${raw}`;
   const translated = t(lookup);
   if (translated !== lookup) return translated;
@@ -105,16 +107,9 @@ function CountOptionMenu({
   countUnit?: string;
   onChange: (val: number) => void;
 }) {
-  const { t } = useI18n();
+  const { t, ts } = useI18n();
   const unit = countUnit || t("unit.video");
-  const options =
-    videoConfig?.count_options?.length
-      ? videoConfig.count_options
-      : prop.enum?.length
-        ? parseCountOptions(prop.enum)
-        : DEFAULT_VIDEO_COUNT_OPTIONS;
-  const allowCustom = videoConfig?.count_allow_custom !== false;
-  const maxCustom = videoConfig?.count_max ?? Number(prop.maximum ?? 50) ?? 50;
+  const { options, minimum, maximum: maxCustom, step, allowCustom } = schemaCountConfig(prop, videoConfig, DEFAULT_VIDEO_COUNT_OPTIONS);
   const count = Math.max(1, Number(value ?? prop.default ?? options[0] ?? 1) || 1);
   const [customDraft, setCustomDraft] = useState(String(count));
 
@@ -122,8 +117,8 @@ function CountOptionMenu({
     <MediaOptionMenu
       icon={iconFor(prop["x-icon"])}
       activeLabel={`${count} ${unit}`}
-      title={t("imageToolbar.count")}
-      subtitle={t("imageToolbar.countDesc")}
+      title={fieldTitle(t, ts, "count", prop)}
+      subtitle={fieldDesc(t, ts, "count", prop)}
       tone={prop["x-highlight"] ? "yellow" : "white"}
       compactOnMobile
     >
@@ -149,8 +144,9 @@ function CountOptionMenu({
                 <input
                   value={customDraft}
                   type="number"
-                  min={1}
+                  min={minimum}
                   max={maxCustom}
+                  step={step}
                   onChange={(e) => setCustomDraft(e.target.value)}
                   className="h-10 flex-1 rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-primary focus:outline-none dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:[color-scheme:dark]"
                 />
@@ -158,7 +154,8 @@ function CountOptionMenu({
                   type="button"
                   className="h-10 rounded-xl border border-gray-900 bg-white px-4 text-sm font-semibold text-gray-900 dark:border-white/10 dark:bg-white/5 dark:text-gray-100"
                   onClick={() => {
-                    const n = Math.min(maxCustom, Math.max(1, parseInt(customDraft, 10) || 1));
+                    const n = Number(customDraft);
+                    if (!Number.isInteger(n) || n < minimum || n > maxCustom || Math.abs(n / step - Math.round(n / step)) > 1e-8) return;
                     onChange(n);
                     setCustomDraft(String(n));
                     closeMenu();
@@ -185,9 +182,10 @@ function renderFieldControl(
   videoConfig?: VideoRuntimeConfig,
   countUnit?: string
 ) {
-  const widget = prop["x-widget"] || (prop.enum?.length ? "option_menu" : "select");
+  const widget = prop["x-widget"] || prop.widget || (prop.enum?.length ? "option_menu" : "select");
+  if (widget === "select" || widget === "textarea") return <SchemaForm schema={{ properties: { [key]: prop } }} values={{ [key]: value ?? prop.default ?? "" }} onChange={(next) => onChange(key, next[key])} />;
 
-  if (key === "count" && widget === "option_menu") {
+  if ((key === "count" || key === "n") && widget === "option_menu") {
     return <CountOptionMenu prop={prop} value={value} videoConfig={videoConfig} countUnit={countUnit} onChange={(n) => onChange(key, n)} />;
   }
 
@@ -340,12 +338,11 @@ export function VideoOptionToolbar({
   const entries = schemaFieldEntries(schema).filter(([, prop]) => !isTopPlacementField(prop));
   if (entries.length === 0) return null;
   const settingsEntries = entries.filter(([, prop]) => prop["x-group"] === "settings");
-  const quickEntries = entries.filter(([, prop]) => prop["x-group"] !== "settings");
   return (
     <>
-      {quickEntries.slice(0, 1).map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, ts, videoConfig, countUnit)}</span>)}
-      {settingsEntries.length > 0 && <VideoSettingsMenu entries={settingsEntries} values={values} onChange={set} t={t} ts={ts} />}
-      {quickEntries.slice(1).map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, ts, videoConfig, countUnit)}</span>)}
+      {entries.map(([key, prop]) => prop["x-group"] === "settings"
+        ? key === settingsEntries[0]?.[0] && <VideoSettingsMenu key={key} entries={settingsEntries} values={values} onChange={set} t={t} ts={ts} />
+        : <span key={key}>{renderFieldControl(key, prop, values[key], set, t, ts, videoConfig, countUnit)}</span>)}
     </>
   );
 }
@@ -366,11 +363,6 @@ export function VideoTopControls({
   const { t, ts } = useI18n();
   const set = (key: string, val: unknown) => onChange({ ...values, [key]: val });
   const entries = schemaFieldEntries(schema).filter(([, prop]) => isTopPlacementField(prop));
-  const priorityIndex = entries.findIndex(([key]) => key === "priority");
-  const audioIndex = entries.findIndex(([key]) => key === "generate_audio");
-  if (priorityIndex >= 0 && audioIndex >= 0 && priorityIndex > audioIndex) {
-    [entries[priorityIndex], entries[audioIndex]] = [entries[audioIndex], entries[priorityIndex]];
-  }
   if (entries.length === 0) return null;
   return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, ts, videoConfig, countUnit)}</span>)}</>;
 }

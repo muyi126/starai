@@ -3466,7 +3466,25 @@ export default function ModelsPage() {
       };
       runtimeRule = parsedRuntimeRule;
     }
-    if (isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference || isOctopusSDMini) {
+    const isZexVideo = form.category === "video" && parsedRuntimeRule?.upstream?.adapter === "zex_video";
+    // Provider normalization supplies protocol defaults; retain explicit editor
+    // choices and presentation settings within those supported capabilities.
+    const configuredProperties = (JSON.parse(form.input_schema || "{}") as Record<string, any>).properties || {};
+    for (const [key, configured] of Object.entries(configuredProperties) as Array<[string, Record<string, any>]>) {
+      const normalized = parsedInputSchema?.properties?.[key];
+      if (!normalized || !configured || typeof configured !== "object") continue;
+      if (Array.isArray(configured.enum) && Array.isArray(normalized.enum)) {
+        if (configured.enum.some((value: unknown) => !normalized.enum.some((supported: unknown) => String(supported) === String(value)))) {
+          setErr(`input_schema.properties.${key}.enum 包含模型不支持的选项`);
+          return;
+        }
+        normalized.enum = configured.enum;
+      }
+      for (const setting of ["title", "description", "placeholder", "enumLabels", "x-enum-labels", "default", "x-widget", "widget", "x-order", "x-icon", "x-highlight", "x-placement", "x-group", "minimum", "maximum", "multipleOf", "minLength", "maxLength", "x-allow-custom"]) {
+        if (Object.prototype.hasOwnProperty.call(configured, setting)) normalized[setting] = configured[setting];
+      }
+    }
+    if (isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference || isOctopusSDMini || isZexVideo) {
       const modeParam = String(parsedRuntimeRule?.video?.mode_param || "generation_mode");
       const modeSchema = parsedInputSchema?.properties?.[modeParam] as Record<string, any> | undefined;
       const schemaDefault = modeSchema?.default;
@@ -5846,7 +5864,19 @@ export default function ModelsPage() {
               <textarea
                 className="w-full mt-1 px-3 py-2 rounded-lg border text-xs font-mono h-32"
                 value={form.input_schema}
-                onChange={(e) => setForm({ ...form, input_schema: e.target.value })}
+                onChange={(e) => {
+                  const text = e.target.value;
+                  setForm((prev) => {
+                    const oldProperties = safeParseJson(prev.input_schema, {})?.properties || {};
+                    const nextProperties = safeParseJson(text, {})?.properties || {};
+                    const defaults = { ...(safeParseJson(prev.default_params, {}) || {}) };
+                    for (const [key, raw] of Object.entries(nextProperties)) {
+                      const prop = raw as Record<string, unknown> | null;
+                      if (prop && Object.prototype.hasOwnProperty.call(prop, "default") && JSON.stringify(prop.default) !== JSON.stringify(oldProperties[key]?.default)) defaults[key] = prop.default;
+                    }
+                    return { ...prev, input_schema: text, default_params: JSON.stringify(defaults, null, 2) };
+                  });
+                }}
               />
             )}
           </div>

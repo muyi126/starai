@@ -17,6 +17,15 @@
 
 OpenLux 部分原生参考页存在正文和端点不一致的示例。涉及原生参数时再核对厂商文档，不复制明显错配的聊天示例。
 
+## 高级 input_schema 与工作台（2026-10-08 审计）
+
+- 修改 `properties.<参数>.default` 时同步到 `default_params`，报价和任务提交使用相同默认参数。未修改的 schema 字段保留现有 `default_params` 覆盖值，兼容普通表单设置；新增字段缺少默认参数时使用 schema 默认值。非法枚举、类型、范围或步长在保存时拒绝。
+- 普通字段支持 `type`、`enum`、`enumLabels` / `x-enum-labels`、`title`、`description`、`placeholder`、`minimum` / `maximum` / `multipleOf`、`minLength` / `maxLength`。布尔枚举保持布尔类型，数组/对象通过现有文本控件编辑 JSON。`required`、数组数量约束由媒体任务 API 校验。
+- `x-widget` 支持 `option_menu`、`select`、`boolean_toggle`、`textarea`，兼容旧 `widget`；`x-order`、`x-placement: top / audio_top` 控制顺序和位置，视频/音频的 `x-group: settings` 收入现有设置菜单。图标和强调样式沿用现有控件支持的 `x-icon` / `x-highlight`。
+- 图片 schema 中声明的数量、比例、尺寸和质量使用现有 schema 控件，避免被固定工具栏覆盖；未声明的字段继续使用原有图片工具栏。显式像素尺寸同时用于报价和任务提交。
+- 数量选项以 schema 为准，并受 `runtime_rule` 的数量上限约束；有枚举时，额外自定义数量需要 `x-allow-custom: true` 且运行规则允许。Veo/Omni 等原生模板可收窄支持的尺寸枚举、修改显示配置；固定协议不支持的选项不能通过 JSON 开启。
+- 上传形态、素材容量、上游字段转发和价格分别仍由 `runtime_rule.video/audio/image`、`runtime_rule.upstream.include/map/static` 和 `price_rule` 管理。仅添加 schema 字段不会扩展上游能力；音频任务维持单结果。现有编辑器不是完整 JSON Schema 引擎，`$ref`、`oneOf`、`if/then/else` 等组合规则不驱动工作台的动态布局。
+
 ## 实施选择
 
 1. 复用 `runtime_rule.upstream.include/map/static` 与独立线路连接配置。标准兼容、厂商原生和二开配置共用任务执行器。

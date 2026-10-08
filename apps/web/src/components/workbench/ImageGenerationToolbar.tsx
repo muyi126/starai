@@ -90,6 +90,7 @@ export function ImageGenerationToolbar({
   sizeTiers = IMAGE_SIZE_TIERS,
   showSizeTier = true,
   showCount = true,
+  showRatio = true,
   allowAutoRatio = false,
 }: {
   count: number;
@@ -107,6 +108,7 @@ export function ImageGenerationToolbar({
   sizeTiers?: ImageSizeTier[];
   showSizeTier?: boolean;
   showCount?: boolean;
+  showRatio?: boolean;
   allowAutoRatio?: boolean;
 }) {
   const { t, ts } = useI18n();
@@ -191,7 +193,7 @@ export function ImageGenerationToolbar({
           )}
         </MediaOptionMenu>
       ) : <>
-        <MediaOptionMenu
+        {showRatio && <MediaOptionMenu
         icon={<FileText size={16} />}
         activeLabel={activeRatio === "auto" ? ts("智能适配") : activeRatio}
         title={t("imageToolbar.ratio")}
@@ -231,7 +233,7 @@ export function ImageGenerationToolbar({
             ))}
           </div>
         )}
-        </MediaOptionMenu>
+        </MediaOptionMenu>}
 
         {showSizeTier && <MediaOptionMenu
         icon={<Settings size={16} />}

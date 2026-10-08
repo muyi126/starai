@@ -607,9 +607,7 @@ function canvasInputSchema(kind: GeneratorKind, schema: Model["input_schema"]) {
 function canvasModelDefaults(kind: GeneratorKind, model?: Model) {
   if (!model) return {};
   const schemaValues = schemaDefaults(canvasInputSchema(kind, model.input_schema));
-  const defaults = kind === "video"
-    ? { ...(model.default_params || {}), ...schemaValues }
-    : { ...schemaValues, ...(model.default_params || {}) };
+  const defaults = { ...schemaValues, ...(model.default_params || {}) };
   if (kind === "audio") {
     delete defaults.count;
     delete defaults.n;

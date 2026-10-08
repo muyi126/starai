@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -1539,6 +1540,9 @@ type CreateModelInput struct {
 
 func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*ModelDTO, error) {
 	input.RequestMode = normalizeCustomMediaRequestMode(input.RequestMode, input.Category)
+	if err := normalizeModelSchemaDefaults(&input); err != nil {
+		return nil, err
+	}
 	if err := validateModelConnection(input); err != nil {
 		return nil, err
 	}
@@ -1599,6 +1603,13 @@ func modelCreateError(code string, err error) error {
 
 func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelInput) (*ModelDTO, error) {
 	input.RequestMode = normalizeCustomMediaRequestMode(input.RequestMode, input.Category)
+	previous, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := normalizeModelSchemaDefaults(&input, previous.InputSchema); err != nil {
+		return nil, err
+	}
 	if err := s.preserveExistingModelSecrets(ctx, id, &input); err != nil {
 		return nil, err
 	}
@@ -1635,6 +1646,58 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 		log.Printf("ensure default API doc for model %s failed: %v", input.Code, err)
 	}
 	return s.SetEnabled(ctx, id, input.IsEnabled)
+}
+
+// Changed schema defaults replace stale parameter defaults. Unchanged fields
+// retain explicit default_params used by the existing visual editors.
+func normalizeModelSchemaDefaults(input *CreateModelInput, previous ...map[string]interface{}) error {
+	input.DefaultParams = copyMap(input.DefaultParams)
+	props, _ := input.InputSchema["properties"].(map[string]interface{})
+	var oldProps map[string]interface{}
+	if len(previous) > 0 {
+		oldProps, _ = previous[0]["properties"].(map[string]interface{})
+	}
+	if raw, exists := input.InputSchema["properties"]; exists && raw != nil && props == nil {
+		return errors.New("input_schema.properties 必须是对象")
+	}
+	for key, raw := range props {
+		prop, _ := raw.(map[string]interface{})
+		if prop == nil {
+			return fmt.Errorf("input_schema.properties.%s 必须是对象", key)
+		}
+		if enum, exists := prop["enum"]; exists {
+			if values, valid := enum.([]interface{}); !valid || len(values) == 0 {
+				return fmt.Errorf("input_schema.properties.%s.enum 必须是非空数组", key)
+			}
+		}
+		for _, bounds := range [][2]string{{"minimum", "maximum"}, {"minLength", "maxLength"}, {"minItems", "maxItems"}} {
+			low, hasLow := prop[bounds[0]]
+			high, hasHigh := prop[bounds[1]]
+			if hasLow && hasHigh && floatValue(low) > floatValue(high) {
+				return fmt.Errorf("input_schema.properties.%s.%s 不能大于 %s", key, bounds[0], bounds[1])
+			}
+		}
+		if step, exists := prop["multipleOf"]; exists && floatValue(step) <= 0 {
+			return fmt.Errorf("input_schema.properties.%s.multipleOf 必须大于 0", key)
+		}
+		if value, exists := prop["default"]; exists {
+			if err := validateSchemaParams(map[string]interface{}{"properties": map[string]interface{}{key: prop}}, map[string]interface{}{key: value}); err != nil {
+				return fmt.Errorf("input_schema 默认值配置无效: %w", err)
+			}
+			oldProp, _ := oldProps[key].(map[string]interface{})
+			oldValue, hadDefault := oldProp["default"]
+			_, hasParam := input.DefaultParams[key]
+			if !hasParam || len(previous) > 0 && (!hadDefault || !reflect.DeepEqual(value, oldValue)) {
+				input.DefaultParams[key] = value
+			}
+		}
+	}
+	schema := copyMap(input.InputSchema)
+	delete(schema, "required") // Prompts and uploads are supplied at task creation.
+	if err := validateSchemaParams(schema, input.DefaultParams); err != nil {
+		return fmt.Errorf("模型默认参数配置无效: %w", err)
+	}
+	return nil
 }
 
 func (s *ModelService) ensureDefaultAPIDoc(ctx context.Context, modelID int64, input CreateModelInput) error {

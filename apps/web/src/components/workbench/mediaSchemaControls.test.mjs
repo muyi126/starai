@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, configureZexUploadProfile } from "../../../../admin/src/lib/multimedia-templates.ts";
-import { buildVideoTaskParams, selectVideoTaskMedia, parseVideoRuntime, videoReferenceCapacity } from "../../../../../packages/shared-types/src/videoModel.ts";
+import { buildVideoTaskParams, selectVideoTaskMedia, parseVideoRuntime, videoReferenceCapacity, schemaCountConfig, enumLabel, schemaFieldEntries, isTopPlacementField, canonicalVideoSize, isSizeBasedVideoProfile } from "../../../../../packages/shared-types/src/videoModel.ts";
 
 function sourceFile(path) {
   return ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -332,4 +332,81 @@ test("custom audio/video scalar fields use the existing accessible themed Schema
       assert.deepEqual(changes, [["custom", prop.type === "number" ? 1.2 : "voice-id"]]);
     }
   }
+});
+
+test("advanced schema controls preserve boolean enums, textarea widgets, steps and structured values", () => {
+  const source = sourceFile("SchemaForm.tsx");
+  const ctx = { exports: {}, React, useI18n: () => ({ ts: s => s }) };
+  execute(source.statements.filter(n => !ts.isImportDeclaration(n)).map(n => n.getText(source)).join("\n"), ctx);
+  const props = {
+    enabled: { type: "boolean", enum: [true, false], default: true },
+    speed: { type: "number", minimum: 0.5, maximum: 2, multipleOf: 0.25 },
+    note: { type: "string", "x-widget": "textarea", placeholder: "custom hint", minLength: 2, maxLength: 20, description: "custom help" },
+    options: { type: "object", default: { a: 1 } },
+  };
+  const changes = [];
+  const nodes = elements(ctx.SchemaForm({ schema: { properties: props }, values: {}, onChange: next => changes.push(next) }));
+  nodes.find(n => n.type === "select").props.onChange({ target: { value: "false" } });
+  assert.equal(changes[0].enabled, false);
+  const number = nodes.find(n => n.type === "input" && n.props.type === "number");
+  assert.deepEqual([number.props.min, number.props.max, number.props.step], [0.5, 2, 0.25]);
+  const textarea = nodes.find(n => n.type === "textarea" && n.props.placeholder === "custom hint");
+  assert.deepEqual([textarea.props.minLength, textarea.props.maxLength], [2, 20]);
+  assert.ok(nodes.some(n => n.props?.title === "custom help"));
+  const json = nodes.find(n => n.type === "textarea" && n.props.value.includes('"a"'));
+  json.props.onChange({ target: { value: '{"a":2}' } });
+  assert.equal(changes[1].options.a, 2);
+  assert.equal(enumLabel({ enum: [true, false], "x-enum-labels": ["Yes", "No"] }, false), "No");
+});
+
+test("schema count menus narrow runtime capabilities and enforce ranges and custom permissions", () => {
+  const runtime = { count_options: [1, 3, 5, 10], count_max: 10, count_allow_custom: true };
+  assert.deepEqual(schemaCountConfig({ enum: [2, 4, 12], maximum: 8 }, runtime), { options: [2, 4], minimum: 1, maximum: 8, step: 1, allowCustom: false });
+  assert.deepEqual(schemaCountConfig({ enum: [2, 3, 5], "x-allow-custom": true }, { ...runtime, count_allow_custom: false }).options, [3, 5]);
+  assert.equal(schemaCountConfig({ enum: [1, 3], "x-allow-custom": true }, runtime).allowCustom, true);
+  assert.deepEqual(schemaCountConfig({ minimum: 2, maximum: 8, multipleOf: 2 }, runtime).options, []);
+});
+
+test("video menus honor custom titles, explicit select widgets and top order", () => {
+  const source = sourceFile("video/VideoOptionToolbar.tsx");
+  const ctx = { exports: {}, React, schemaFieldEntries, isTopPlacementField, FIELD_TITLE_KEY: { duration: "generic" }, useI18n: () => ({ t: s => s, ts: s => s }), SchemaForm: "form", renderFieldControl: (key) => key };
+  execute(findNode(source, n => ts.isFunctionDeclaration(n) && n.name?.text === "fieldTitle").getText(source), ctx);
+  assert.equal(ctx.fieldTitle(s => s, s => s, "duration", { title: "自定义时长" }), "自定义时长");
+  execute(findNode(source, n => ts.isFunctionDeclaration(n) && n.name?.text === "VideoTopControls").getText(source), ctx);
+  const tree = ctx.VideoTopControls({ schema: { properties: { priority: { "x-placement": "top", "x-order": 9 }, generate_audio: { "x-placement": "top", "x-order": 1 } } }, values: {}, onChange() {} });
+  assert.deepEqual(elements(tree).filter(n => n.type === "span").map(n => n.props.children[0]), ["generate_audio", "priority"]);
+  execute(findNode(source, n => ts.isFunctionDeclaration(n) && n.name?.text === "renderFieldControl").getText(source), ctx);
+  assert.equal(ctx.renderFieldControl("duration", { type: "integer", enum: [5, 10], "x-widget": "select" }, 5, () => {}).type, "form");
+});
+
+test("size-based video display retains a configured subset and presentation instead of expanding it", () => {
+  const source = sourceFile("ModelWorkspace.tsx");
+  const ctx = { canonicalVideoSize, isSizeBasedVideoProfile };
+  execute(findNode(source, n => ts.isFunctionDeclaration(n) && n.name?.text === "sizeBasedVideoSchema").getText(source), ctx);
+  const result = ctx.sizeBasedVideoSchema({ properties: { size: { type: "string", enum: ["720x1280"], title: "竖屏尺寸", default: "720x1280", "x-widget": "select", "x-icon": "custom" } } }, { video: { upload_profile: "veo_reference" } }, {});
+  assert.deepEqual(Array.from(result.properties.size.enum), ["720x1280"]);
+  assert.equal(result.properties.size.title, "竖屏尺寸");
+  assert.equal(result.properties.size["x-widget"], "select");
+});
+
+test("image schema fields remain editable and the same explicit size reaches quotes and submission", () => {
+  const source = sourceFile("ModelWorkspace.tsx");
+  const ctx = { isImage: true, useMemo: fn => fn(), schemaProperties: schema => schema.properties || {}, workbenchInputSchema: { properties: { count: { enum: [1, 3] }, aspect_ratio: { enum: ["9:16"] }, image_size: { enum: ["2K"] }, size: { enum: ["800x1200"] }, quality: { enum: ["high"] } } }, model: { runtime_rule: {} } };
+  const config = findNode(source, n => ts.isVariableDeclaration(n) && n.name.getText(source) === "imageOptionSchema");
+  execute(`var ${config.getText(source)};`, ctx);
+  assert.deepEqual(Object.keys(ctx.imageOptionSchema.properties), ["count", "aspect_ratio", "image_size", "size", "quality"]);
+  Object.assign(ctx, { imageProperties: ctx.imageOptionSchema.properties, params: { count: 3, aspect_ratio: "9:16", image_size: "2K", size: "800x1200" }, fallbackImageCount: 1, fallbackImageRatio: "1:1", fallbackImageSize: "1K" });
+  for (const name of ["imageCount", "imageRatio", "imageSize"]) execute(`var ${findNode(source, n => ts.isVariableDeclaration(n) && n.name.getText(source) === name).getText(source)};`, ctx);
+  assert.deepEqual([ctx.imageCount, ctx.imageRatio, ctx.imageSize], [3, "9:16", "2K"]);
+  // Execute the actual image parameter expression used by submission.
+  const imageParams = findNode(source, n => ts.isVariableDeclaration(n) && n.name.getText(source) === "imageParams");
+  Object.assign(ctx, { buildImageGenerationParams: ({ count, ratio, imageSize }) => ({ count, n: count, aspect_ratio: ratio, image_size: imageSize, size: "derived" }), isAliyunQwenImage: false, buildLanguageParams: () => ({}), selectedLanguage: {}, prompt: "test", bottom: {} });
+  execute(`var ${imageParams.getText(source)};`, ctx);
+  assert.equal(ctx.imageParams.size, "800x1200");
+  assert.equal(ctx.imageParams.count, 3);
+  const estimate = findNode(source, n => ts.isVariableDeclaration(n) && n.name.getText(source) === "estimateBody");
+  Object.assign(ctx, { isVideo: false, isAudio: false, isMultiCollab: false, refImages: [], referenceAssetIds: [] });
+  execute(`var estimateBody = (${estimate.initializer.arguments[0].getText(source)})();`, ctx);
+  assert.equal(JSON.parse(ctx.estimateBody).params.size, "800x1200");
+  assert.equal(JSON.parse(ctx.estimateBody).params.count, 3);
 });

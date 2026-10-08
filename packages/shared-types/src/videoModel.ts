@@ -64,14 +64,19 @@ export interface UpstreamRuntimeConfig {
 export interface SchemaFieldMeta {
   type?: string;
   title?: string;
+  description?: string;
   enum?: (string | number | boolean)[];
   default?: unknown;
   minimum?: number;
   maximum?: number;
+  multipleOf?: number;
+  "x-allow-custom"?: boolean;
+  "x-enum-labels"?: string[];
   /** Display label map for enum values */
   enumLabels?: Record<string, string>;
   /** option_menu | boolean_toggle | select */
   "x-widget"?: string;
+  widget?: string;
   "x-order"?: number;
   "x-icon"?: string;
   "x-highlight"?: boolean;
@@ -207,7 +212,21 @@ export function schemaDefaultsFromFields(schema: unknown): Record<string, unknow
 
 export function enumLabel(prop: SchemaFieldMeta, value: unknown): string {
   const s = String(value);
-  return prop.enumLabels?.[s] ?? s;
+  const index = prop.enum?.findIndex((option) => String(option) === s) ?? -1;
+  return prop.enumLabels?.[s] ?? prop["x-enum-labels"]?.[index] ?? s;
+}
+
+/** Schema choices may narrow the runtime capability, never exceed it. */
+export function schemaCountConfig(prop: SchemaFieldMeta, runtime: Pick<VideoRuntimeConfig, "count_options" | "count_max" | "count_allow_custom"> = {}, fallback = DEFAULT_VIDEO_COUNT_OPTIONS) {
+  const minimum = Math.max(1, Math.ceil(prop.minimum ?? 1));
+  const maximum = Math.min(50, runtime.count_max ?? 50, prop.maximum ?? 50);
+  const step = prop.multipleOf && prop.multipleOf > 0 ? prop.multipleOf : 1;
+  const valid = (n: number) => Number.isInteger(n) && n >= minimum && n <= maximum && Math.abs(n / step - Math.round(n / step)) < 1e-8;
+  const capability = runtime.count_options || [];
+  const options = parseCountOptions(prop.enum?.length ? prop.enum : capability.length ? capability : fallback)
+    .filter((n) => valid(n) && (runtime.count_allow_custom !== false || !capability.length || capability.includes(n)));
+  const allowCustom = runtime.count_allow_custom !== false && (prop["x-allow-custom"] === true || !prop.enum?.length);
+  return { options, minimum, maximum, step, allowCustom };
 }
 
 export function selectVideoTaskMedia(params: Record<string, unknown>, media: VideoMediaState, runtimeRule?: Record<string, unknown>): VideoMediaState {

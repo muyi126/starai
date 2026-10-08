@@ -5,6 +5,47 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 
+test("advanced JSON editing synchronizes changed defaults of all field types and tolerates unfinished JSON", () => {
+  const source = ts.createSourceFile("models.tsx", readFileSync(new URL("../app/admin/models/page.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let handler;
+  function visit(node) {
+    if (ts.isJsxAttribute(node) && node.name.getText(source) === "onChange" && node.parent.getText(source).includes("value={form.input_schema}")) handler = node.initializer.expression;
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(handler);
+  let form = { input_schema: JSON.stringify({ properties: { duration: { default: 5 }, enabled: { default: true }, quality: { default: "auto" } } }), default_params: JSON.stringify({ duration: 5, enabled: true, quality: "high", channel_key: "keep" }) };
+  const ctx = { setForm: update => { form = update(form); }, safeParseJson: (text, fallback) => { try { return JSON.parse(text); } catch { return fallback; } } };
+  vm.runInNewContext(ts.transpileModule(`var change = ${handler.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
+  ctx.change({ target: { value: JSON.stringify({ properties: { duration: { default: 10 }, enabled: { default: false }, quality: { default: "auto" }, options: { default: [1, 2] } } }) } });
+  assert.deepEqual(JSON.parse(form.default_params), { duration: 10, enabled: false, quality: "high", channel_key: "keep", options: [1, 2] });
+  ctx.change({ target: { value: '{"properties":' } });
+  assert.equal(form.input_schema, '{"properties":');
+  assert.equal(JSON.parse(form.default_params).duration, 10);
+});
+
+test("provider save normalization preserves supported JSON choices and presentation settings", () => {
+  const source = ts.createSourceFile("models.tsx", readFileSync(new URL("../app/admin/models/page.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let declaration, loop;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "configuredProperties") declaration = node;
+    if (ts.isForOfStatement(node) && node.expression.getText(source).includes("Object.entries(configuredProperties)")) loop = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(declaration && loop);
+  for (const supported of [true, false]) {
+    let error;
+    const field = { type: "string", enum: supported ? ["720x1280"] : ["4096x4096"], default: "720x1280", title: "我的竖屏", enumLabels: { "720x1280": "自定义标签" }, "x-order": 17, "x-widget": "select", "x-placement": "top" };
+    const ctx = { form: { input_schema: JSON.stringify({ properties: { size: field } }) }, parsedInputSchema: { properties: { size: { enum: ["1280x720", "720x1280"], title: "视频尺寸", "x-order": 3, "x-widget": "option_menu" } } }, setErr: value => { error = value; } };
+    const code = `function preserve() { var ${declaration.getText(source)}; ${loop.getText(source)} } preserve();`;
+    vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, ctx);
+    if (!supported) { assert.ok(error?.includes("不支持")); continue; }
+    assert.equal(error, undefined);
+    for (const key of ["enum", "default", "title", "enumLabels", "x-order", "x-widget", "x-placement"]) assert.deepEqual(JSON.parse(JSON.stringify(ctx.parsedInputSchema.properties.size[key])), field[key]);
+  }
+});
+
 test("Zex video templates encode gateway capabilities instead of vendor-native fields", () => {
   const templates = MULTIMEDIA_TEMPLATES.filter((item) => item.runtime.upstream.adapter === "zex_video");
   assert.equal(templates.length, 8);
@@ -93,6 +134,48 @@ test("MiniMax multimodal menus reuse existing upload profiles and respect disabl
     assert.equal(configured.price_rule, form.price_rule);
     assert.deepEqual(JSON.parse(configured.runtime_rule).upstream, runtime.upstream);
     assert.deepEqual(JSON.parse(configureZexUploadProfile(form, "none").input_schema).properties.generation_mode.enum, ["text"]);
+  }
+});
+
+test("saving advanced gateway material defaults synchronizes workbench params and validates the selected mode", () => {
+  const source = ts.createSourceFile("models.tsx", readFileSync(new URL("../app/admin/models/page.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let sync;
+  function visit(node) {
+    if (ts.isIfStatement(node) && node.expression.getText(source).includes("isSeedance2 || isMiniMaxH3") && node.thenStatement.getText(source).includes("schemaDefault")) sync = node.getText(source);
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(sync);
+  const save = ts.transpileModule(`function save() { ${sync} } save();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const template of MULTIMEDIA_TEMPLATES.filter(item => item.runtime.upstream.adapter === "zex_video")) {
+    const applied = applyMultimediaTemplate({ new_api_model: "", new_api_extra_params: "{}", runtime_rule: "{}" }, template.key);
+    const configured = configureZexUploadProfile(applied, template.key.startsWith("zex_seedance") ? "seedance_2" : "aliyun_multimodal");
+    const input = JSON.parse(configured.input_schema);
+    const runtime = JSON.parse(configured.runtime_rule);
+    for (const mode of [...input.properties.generation_mode.enum, "unsupported_mode"]) {
+      input.properties.generation_mode.default = mode;
+      const context = {
+        isSeedance2: false, isMiniMaxH3: false, isVeoReference: false, isOmniReference: false, isOctopusSDMini: false, isZexVideo: true,
+        parsedRuntimeRule: runtime, parsedInputSchema: input, defaultParams: JSON.parse(configured.default_params), setErr: message => { context.error = message; },
+      };
+      vm.runInNewContext(save, context);
+      if (mode === "unsupported_mode") {
+        assert.ok(context.error, `${template.key} must reject an unavailable default`);
+      } else {
+        assert.equal(context.error, undefined);
+        assert.equal(context.defaultParams.generation_mode, mode, template.key);
+        assert.equal(context.defaultParams.duration, template.defaults.duration);
+        assert.equal(context.defaultParams.resolution, template.defaults.resolution);
+      }
+    }
+    runtime.video.mode_param = "custom_mode";
+    input.properties.custom_mode = { ...input.properties.generation_mode, default: "first_frame", enum: ["text", "first_frame"] };
+    const context = {
+      isSeedance2: false, isMiniMaxH3: false, isVeoReference: false, isOmniReference: false, isOctopusSDMini: false, isZexVideo: true,
+      parsedRuntimeRule: runtime, parsedInputSchema: input, defaultParams: { custom_mode: "text" }, setErr: message => { throw new Error(message); },
+    };
+    vm.runInNewContext(save, context);
+    assert.equal(context.defaultParams.custom_mode, "first_frame");
   }
 });
 

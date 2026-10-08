@@ -9,7 +9,7 @@ import {
   DEFAULT_AUDIO_COUNT_OPTIONS,
   enumLabel,
   isTopPlacementField,
-  parseCountOptions,
+  schemaCountConfig,
   schemaFieldEntries,
   type AudioRuntimeConfig,
   type SchemaFieldMeta,
@@ -76,14 +76,7 @@ function CountOptionMenu({
   onChange: (val: number) => void;
 }) {
   const { ts, td } = useI18n();
-  const options =
-    audioConfig?.count_options?.length
-      ? audioConfig.count_options
-      : prop.enum?.length
-        ? parseCountOptions(prop.enum)
-        : DEFAULT_AUDIO_COUNT_OPTIONS;
-  const allowCustom = audioConfig?.count_allow_custom !== false;
-  const maxCustom = audioConfig?.count_max ?? Number(prop.maximum ?? 50) ?? 50;
+  const { options, minimum, maximum: maxCustom, step, allowCustom } = schemaCountConfig(prop, audioConfig, DEFAULT_AUDIO_COUNT_OPTIONS);
   const count = Math.max(1, Number(value ?? prop.default ?? options[0] ?? 1) || 1);
   const [customDraft, setCustomDraft] = useState(String(count));
 
@@ -91,8 +84,8 @@ function CountOptionMenu({
     <OptionMenu
       icon={iconFor(prop["x-icon"])}
       activeLabel={td("audio.count", "{count}", { count })}
-      title={prop.title || ts("生成数量")}
-      subtitle={ts("选择生成内容的数量")}
+      title={ts(prop.title || "生成数量")}
+      subtitle={ts(prop.description || "选择生成内容的数量")}
       tone={prop["x-highlight"] ? "yellow" : "white"}
     >
       {(closeMenu) => (
@@ -124,8 +117,9 @@ function CountOptionMenu({
                 <input
                   value={customDraft}
                   type="number"
-                  min={1}
+                  min={minimum}
                   max={maxCustom}
+                  step={step}
                   onChange={(e) => setCustomDraft(e.target.value)}
                   className="h-10 flex-1 px-3 rounded-xl bg-white border border-gray-200 text-sm text-gray-900 focus:outline-none focus:border-primary dark:bg-white/5 dark:border-white/10 dark:text-gray-100 dark:[color-scheme:dark]"
                 />
@@ -133,7 +127,8 @@ function CountOptionMenu({
                   type="button"
                   className="h-10 px-4 rounded-xl bg-white border border-gray-900 text-gray-900 text-sm font-semibold dark:bg-white/5 dark:border-white/10 dark:text-gray-100"
                   onClick={() => {
-                    const n = Math.min(maxCustom, Math.max(1, parseInt(customDraft, 10) || 1));
+                    const n = Number(customDraft);
+                    if (!Number.isInteger(n) || n < minimum || n > maxCustom || Math.abs(n / step - Math.round(n / step)) > 1e-8) return;
                     onChange(n);
                     setCustomDraft(String(n));
                     closeMenu();
@@ -158,7 +153,8 @@ function renderFieldControl(
   audioConfig: AudioRuntimeConfig | undefined,
   translate: (source: string) => string
 ) {
-  const widget = prop["x-widget"] || (prop.enum?.length ? "option_menu" : "select");
+  const widget = prop["x-widget"] || prop.widget || (prop.enum?.length ? "option_menu" : "select");
+  if (widget === "select" || widget === "textarea") return <SchemaForm schema={{ properties: { [key]: prop } }} values={{ [key]: value ?? prop.default ?? "" }} onChange={(next) => onChange(key, next[key])} />;
 
   if (key === "count" && widget === "option_menu") {
     return <CountOptionMenu prop={prop} value={value} audioConfig={audioConfig} onChange={(n) => onChange(key, n)} />;
@@ -193,7 +189,7 @@ function renderFieldControl(
       icon={iconFor(prop["x-icon"])}
       activeLabel={translate(String(activeLabel))}
       title={translate(prop.title || key)}
-      subtitle={translate(`选择${prop.title || key}`)}
+      subtitle={translate(prop.description || `选择${prop.title || key}`)}
       tone={prop["x-highlight"] ? "yellow" : "white"}
     >
       {(closeMenu) => (
@@ -336,15 +332,15 @@ export function AudioOptionToolbar({
   const entries = allEntries.filter(([, prop]) => !isTopPlacementField(prop));
   if (entries.length === 0) return null;
 
-  if (isMiniMaxSpeech28Schema(allEntries)) {
-    const quickEntries = entries.filter(([key]) => !MINIMAX_SPEECH_SETTINGS_KEYS.has(key));
-    const settingsEntries = entries.filter(([key]) => MINIMAX_SPEECH_SETTINGS_KEYS.has(key));
+  const nativeSettings = isMiniMaxSpeech28Schema(allEntries);
+  const grouped = (key: string, prop: SchemaFieldMeta) => prop["x-group"] === "settings" || (prop["x-group"] === undefined && nativeSettings && MINIMAX_SPEECH_SETTINGS_KEYS.has(key));
+  const settingsEntries = entries.filter(([key, prop]) => grouped(key, prop));
+  if (settingsEntries.length) {
     return (
       <>
-        {quickEntries.map(([key, prop]) => (
-          <span key={key}>{renderFieldControl(key, prop, values[key], set, audioConfig, ts)}</span>
-        ))}
-        {settingsEntries.length > 0 && <AdvancedAudioSettings entries={settingsEntries} values={values} onChange={set} translate={ts} />}
+        {entries.map(([key, prop]) => grouped(key, prop)
+          ? key === settingsEntries[0][0] && <AdvancedAudioSettings key={key} entries={settingsEntries} values={values} onChange={set} translate={ts} />
+          : <span key={key}>{renderFieldControl(key, prop, values[key], set, audioConfig, ts)}</span>)}
       </>
     );
   }

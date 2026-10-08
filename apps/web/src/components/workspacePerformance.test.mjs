@@ -296,6 +296,7 @@ test("model translated metadata preserves drafts while real schema, runtime and 
     isVideo: false, isAudio: false, isImage: true, capDeepThink: false, reasoningConfig: { default_enabled: false }, imageAllowsAutoRatio: false, imageCountMax: 10,
     parseAudioRuntime: () => ({}), schemaProperties: schema => schema.properties,
     schemaDefaults: schema => Object.fromEntries(Object.entries(schema.properties).map(([key, prop]) => [key, prop.default ?? prop.enum?.[0]])),
+    schemaDefaultsFromFields: schema => Object.fromEntries(Object.entries(schema.properties).map(([key, prop]) => [key, prop.default ?? prop.enum?.[0]])),
     EMPTY_VIDEO_MEDIA: {}, defaultImageSizeForConfig: () => "1K", normalizeRatio: value => value,
   };
   for (const [, setter] of call.arguments[0].getText(file).matchAll(/\b(set[A-Z]\w*)\(/g)) context[setter] = value => {

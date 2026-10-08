@@ -471,13 +471,9 @@ export function AgentWorkspace({ code }: { code: string }) {
                 const runtimeImage = (m.runtime_rule?.image || {}) as Record<string, unknown>;
                 const defaultRatio = String(m.default_params?.aspect_ratio || "1:1");
                 setImageRatio(defaultRatio === "auto" && runtimeImage.allow_auto_ratio === true ? "auto" : normalizeRatio(defaultRatio));
-                setImageSize(normalizeTier(String(runtimeImage.default_quality || m.default_params?.quality || m.default_params?.image_size || "1K")));
+                setImageSize(normalizeTier(String(m.default_params?.image_size || m.default_params?.quality || runtimeImage.default_quality || "1K")));
               }
-              setParams(
-                m.category === "video"
-                  ? { ...(m.default_params || {}), ...schemaDefaultsFromFields(m.input_schema) }
-                  : { ...schemaDefaultsFromFields(m.input_schema), ...(m.default_params || {}) }
-              );
+              setParams({ ...schemaDefaultsFromFields(m.input_schema), ...(m.default_params || {}) });
               if (typeof m.default_params?.channel_key === "string") {
                 setBottom((prev) => ({ ...prev, channel_key: String(m.default_params.channel_key) }));
               }
