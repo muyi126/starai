@@ -4542,6 +4542,7 @@ function CanvasEditor({
     const audioRuntime = parseAudioRuntime(selectedModel?.runtime_rule);
     const isSeedance2 = node.data.mediaKind === "video" && videoRuntime.upload_profile === "seedance_2";
     const isMiniMaxH3 = node.data.mediaKind === "video" && videoRuntime.upload_profile === "minimax_h3";
+    const isGatewayVideo = node.data.mediaKind === "video" && (videoRuntime.upload_profile === "gateway_reference" || (selectedModel.runtime_rule as any)?.upstream?.adapter === "zex_video");
     const isAliyunMultimodal = node.data.mediaKind === "video" && videoRuntime.upload_profile === "aliyun_multimodal";
     const promptRequired =
       node.data.mediaKind === "video"
@@ -4805,12 +4806,15 @@ function CanvasEditor({
         const properties = selectedModel.input_schema?.properties as Record<string, { enum?: unknown[] }> | undefined;
         baseParams[modeKey] = storyVideoMode(baseParams[modeKey], String(videoRuntime.upload_profile || ""), properties?.[modeKey]?.enum || []);
       }
-      if (isSeedance2) baseParams[videoRuntime.mode_param || "generation_mode"] = inferredSeedanceMode;
-      if ((isMiniMaxH3 || isAliyunMultimodal) && (explicitFirstFrame || explicitLastFrame)) {
+      if (isSeedance2 && !["first_frame", "first_last"].includes(String(baseParams[videoRuntime.mode_param || "generation_mode"]))) baseParams[videoRuntime.mode_param || "generation_mode"] = inferredSeedanceMode;
+      if ((isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal) && (explicitFirstFrame || explicitLastFrame)) {
         baseParams[videoRuntime.mode_param || "generation_mode"] = explicitFirstFrame && explicitLastFrame ? "first_last" : explicitFirstFrame ? "first_frame" : "last_frame";
       }
+      if (isGatewayVideo && baseParams[videoRuntime.mode_param || "generation_mode"] === "text" && !explicitFirstFrame && !explicitLastFrame && (imageInputs.length || videoInputs.length || audioInputs.length)) {
+        baseParams[videoRuntime.mode_param || "generation_mode"] = isSeedance2 ? inferredSeedanceMode : "reference";
+      }
       const h3Mode = String(baseParams[videoRuntime.mode_param || "generation_mode"] || "text");
-      if (isMiniMaxH3 || isAliyunMultimodal) {
+      if (isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal) {
         if (h3Mode === "first_frame" && !explicitFirstFrame && imageInputs.length < 1) {
           update(id, { status: "failed", error: t("canvas.node.firstFrameRequired") });
           return;
@@ -4823,7 +4827,7 @@ function CanvasEditor({
           update(id, { status: "failed", error: t("canvas.node.firstLastFramesRequired") });
           return;
         }
-        if (h3Mode === "reference" && imageInputs.length === 0 && videoInputs.length === 0) {
+        if (h3Mode === "reference" && imageInputs.length === 0 && videoInputs.length === 0 && (!isGatewayVideo || audioInputs.length === 0)) {
           update(id, { status: "failed", error: t("canvas.node.referenceVisualRequired") });
           return;
         }
@@ -4974,12 +4978,12 @@ function CanvasEditor({
         });
         return;
       }
-      const h3FirstFrame = (isMiniMaxH3 || isAliyunMultimodal) && (h3Mode === "first_frame" || h3Mode === "first_last")
+      const h3FirstFrame = (isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal) && (h3Mode === "first_frame" || h3Mode === "first_last")
         ? { url: explicitFirstFrame || imageInputs[0], name: explicitFirstFrame || imageInputs[0] }
         : null;
-      const h3LastFrame = (isMiniMaxH3 || isAliyunMultimodal) && h3Mode === "last_frame"
+      const h3LastFrame = (isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal) && h3Mode === "last_frame"
         ? { url: explicitLastFrame || imageInputs[0], name: explicitLastFrame || imageInputs[0] }
-        : (isMiniMaxH3 || isAliyunMultimodal) && h3Mode === "first_last"
+        : (isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal) && h3Mode === "first_last"
           ? { url: explicitLastFrame || imageInputs[1], name: explicitLastFrame || imageInputs[1] }
           : null;
       const framePairProfile = ["frame_pair", "veo_frame_pair"].includes(String(videoRuntime.upload_profile || ""));
@@ -5004,7 +5008,7 @@ function CanvasEditor({
               ...buildVideoTaskParams(
                 baseParams,
                 {
-                  reference_images: ((isMiniMaxH3 || isAliyunMultimodal) && h3Mode !== "reference") || videoRuntime.upload_profile === "veo_frame_pair"
+                  reference_images: ((isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal) && ["text", "first_frame", "first_last", "last_frame"].includes(h3Mode)) || videoRuntime.upload_profile === "veo_frame_pair"
                     ? []
                     : framePairReferenceImages.map((url) => ({ url, name: url })),
                   reference_videos: videoInputs.map((url) => ({ url, name: url })),

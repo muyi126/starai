@@ -121,7 +121,7 @@ interface PrimaryRouteConnection {
   apiKeyHeader: string;
 }
 
-export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, requestMode, modelBillingType, onPrimaryConnectionChange, onPrimaryBillingTypeChange }: { modelId: number; upstreamModel: string; endpoint: string; requestMode: string; modelBillingType: string; onPrimaryConnectionChange?: (connection: PrimaryRouteConnection) => void; onPrimaryBillingTypeChange?: (billingType: string) => void }) {
+export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, requestMode, modelBillingType, durationPriceTiers = [], resolutionPriceTiers = [], onPrimaryConnectionChange, onPrimaryBillingTypeChange }: { modelId: number; upstreamModel: string; endpoint: string; requestMode: string; modelBillingType: string; durationPriceTiers?: number[]; resolutionPriceTiers?: string[]; onPrimaryConnectionChange?: (connection: PrimaryRouteConnection) => void; onPrimaryBillingTypeChange?: (billingType: string) => void }) {
   const defaultBillingType = normalizedBillingType(modelBillingType);
   const canSyncModelBillingType = supportedBillingTypes.has(String(modelBillingType || "").trim());
   const [routes, setRoutes] = useState<ModelRoute[]>([]);
@@ -264,10 +264,14 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, requestMod
     } finally { setBusy(false); }
   };
 
-  const setCostField = (key: string, value: string | number) => setForm((current) => ({
-    ...current,
-    cost_rule: { ...(current.cost_rule || {}), [key]: value },
-  }));
+  const setCostField = (key: string, value: string | number) => setForm((current) => {
+    const cost = { ...(current.cost_rule || {}) };
+    if (key === "unit_cost" && resolutionPriceTiers.length > 0 && ["per_request", "per_second"].includes(String(cost.billing_type)) && !cost.unit_cost_by_duration) {
+      const tiers = (cost.unit_cost_by_resolution || {}) as Record<string, number>;
+      cost.unit_cost_by_resolution = { ...Object.fromEntries(resolutionPriceTiers.map(tier => [tier, tiers[tier] ?? cost.unit_cost ?? 0])), ...tiers };
+    }
+    return { ...current, cost_rule: { ...cost, [key]: value } };
+  });
   const setImageTierCost = (tier: string, value: number) => setForm((current) => ({
     ...current,
     cost_rule: {
@@ -361,7 +365,11 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, requestMod
                 {["1K", "2K", "4K"].map((tier) => (
                   <label key={tier} className="text-xs text-gray-600">{tier} 上游成本 / 张<input type="number" min={0} step="0.000001" value={Number((form.cost_rule?.unit_cost_by_size as Record<string, number> | undefined)?.[tier] ?? form.cost_rule?.unit_cost ?? 0)} onChange={(e) => setImageTierCost(tier, Math.max(0, Number(e.target.value) || 0))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
                 ))}
-              </> : <label className="text-xs text-gray-600">上游单位成本<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.unit_cost || 0)} onChange={(e) => setCostField("unit_cost", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>}
+              </> : billingType === "per_request" && durationPriceTiers.length > 0 ? durationPriceTiers.map((duration) => (
+                <label key={duration} className="text-xs text-gray-600">{duration} 秒上游固定成本<input type="number" min={0} step="0.000001" value={Number((form.cost_rule?.unit_cost_by_duration as Record<string, number> | undefined)?.[duration] ?? form.cost_rule?.unit_cost ?? 0)} onChange={(e) => setForm((current) => ({ ...current, cost_rule: { ...current.cost_rule, unit_cost_by_duration: { ...((current.cost_rule.unit_cost_by_duration as Record<string, number> | undefined) || {}), [duration]: Math.max(0, Number(e.target.value) || 0) } } }))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
+              )) : ["per_request", "per_second"].includes(billingType) && resolutionPriceTiers.length > 0 ? <>{resolutionPriceTiers.map((resolution) => (
+                <label key={resolution} className="text-xs text-gray-600">{resolution} 上游成本 / {billingType === "per_request" ? "次" : "秒"}<input type="number" min={0} step="0.000001" value={Number((form.cost_rule?.unit_cost_by_resolution as Record<string, number> | undefined)?.[resolution] ?? form.cost_rule?.unit_cost ?? 0)} onChange={(e) => setForm((current) => ({ ...current, cost_rule: { ...current.cost_rule, unit_cost_by_resolution: { ...Object.fromEntries(resolutionPriceTiers.map((tier) => [tier, (current.cost_rule.unit_cost_by_resolution as Record<string, number> | undefined)?.[tier] ?? current.cost_rule.unit_cost ?? 0])), ...((current.cost_rule.unit_cost_by_resolution as Record<string, number> | undefined) || {}), [resolution]: Math.max(0, Number(e.target.value) || 0) } } }))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
+              ))}<label className="text-xs text-gray-600">其他情况（Other cases）上游成本 / {billingType === "per_request" ? "次" : "秒"}<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.unit_cost ?? 0)} onChange={(e) => setCostField("unit_cost", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label></> : <label className="text-xs text-gray-600">上游单位成本<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.unit_cost || 0)} onChange={(e) => setCostField("unit_cost", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>}
             </div>
           </div>
           <details className="col-span-2 rounded-lg border p-3"><summary className="cursor-pointer text-xs font-medium text-gray-700">高级配置</summary><div className="mt-3 grid grid-cols-3 gap-3"><label className="text-xs text-gray-600">请求头 JSON<textarea value={advanced.headers} onChange={(e) => setAdvanced({ ...advanced, headers: e.target.value })} className="mt-1 h-28 w-full rounded-lg border p-2 font-mono text-xs" /></label><label className="text-xs text-gray-600">附加参数 JSON<textarea value={advanced.extra} onChange={(e) => setAdvanced({ ...advanced, extra: e.target.value })} className="mt-1 h-28 w-full rounded-lg border p-2 font-mono text-xs" /></label><label className="text-xs text-gray-600">线路运行规则 JSON<textarea value={advanced.runtime} onChange={(e) => setAdvanced({ ...advanced, runtime: e.target.value })} className="mt-1 h-28 w-full rounded-lg border p-2 font-mono text-xs" /></label></div></details>

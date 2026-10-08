@@ -58,7 +58,9 @@ func TestTaskReadDatabase(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	_, err = pool.Exec(ctx, `
-		CREATE TEMP TABLE models (id bigint PRIMARY KEY, code text);
+		CREATE TEMP TABLE models (id bigint PRIMARY KEY, code text, display_name text);
+		CREATE TEMP TABLE users (id bigint PRIMARY KEY, nickname text);
+		CREATE TEMP TABLE auth_identities (id bigint PRIMARY KEY, user_id bigint, provider text, identifier text);
 		CREATE TEMP TABLE tasks (
 		  id bigint PRIMARY KEY, task_no text UNIQUE, user_id bigint, status text,
 		  output jsonb DEFAULT '{}', error_message text, upstream_task_id text,
@@ -71,6 +73,9 @@ func TestTaskReadDatabase(t *testing.T) {
 		INSERT INTO tasks(id,task_no,user_id,status) VALUES
 		  (1,'running',1,'running'),(2,'success',1,'succeeded'),(3,'bad-progress',1,'running'),
 		  (4,'private',2,'running'),(5,'pending',1,'pending'),(6,'cancelled',1,'cancelled');
+		INSERT INTO users VALUES (1,'Fixture'),(2,'Other fixture');
+		INSERT INTO models VALUES (1,'seedance25','章鱼哥 Seedance 2.5');
+		UPDATE tasks SET model_id=1 WHERE task_no='running';
 		INSERT INTO task_events(task_id,event_type,payload) VALUES
 		  (1,'progress','{"progress":12,"status":"old"}'),
 		  (1,'progress','{"progress":67,"status":"generating"}'),
@@ -80,6 +85,15 @@ func TestTaskReadDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	tasks := &TaskService{db: pool}
+	adminItems, total, err := tasks.ListAdmin(ctx, 1, 20, "running")
+	if err != nil || total != 3 || len(adminItems) != 3 {
+		t.Fatalf("admin list: count=%d total=%d err=%v", len(adminItems), total, err)
+	}
+	for _, task := range adminItems {
+		if task.TaskNo == "running" && (task.ModelName == nil || *task.ModelName != "章鱼哥 Seedance 2.5" || task.ModelCode == nil || *task.ModelCode != "seedance25") {
+			t.Fatalf("admin model display: %+v", task)
+		}
+	}
 	before := pool.Stat().AcquireCount()
 	item, err := tasks.Get(ctx, 1, "running")
 	if err != nil || item.Progress != 67 || item.UpstreamStatus != "generating" {

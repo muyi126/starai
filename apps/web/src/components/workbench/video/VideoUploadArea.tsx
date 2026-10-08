@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ArrowRight, Film, Music2, Plus, UserRound, X } from "lucide-react";
 import type { VideoMediaItem, VideoMediaState, VideoRuntimeConfig } from "@starai/shared-types";
+import { videoReferenceCapacity } from "@starai/shared-types";
 import { uploadAsset } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
 import { SeedancePortraitDialog } from "./SeedancePortraitDialog";
@@ -32,6 +33,7 @@ function EmptyUploadBox({
   uploading,
   tilt,
   compact,
+  multiple,
   accept = IMAGE_ACCEPT,
 }: {
   label: string;
@@ -39,6 +41,7 @@ function EmptyUploadBox({
   uploading?: boolean;
   tilt?: boolean;
   compact?: boolean;
+  multiple?: boolean;
   accept?: string;
 }) {
   return (
@@ -54,6 +57,7 @@ function EmptyUploadBox({
       <input
         type="file"
         accept={accept}
+        multiple={multiple}
         className="hidden"
         disabled={uploading}
         onChange={(e) => {
@@ -180,7 +184,7 @@ function ReferenceImageStack({
   if (images.length === 0) {
     if (max <= 0) return null;
     return (
-      <EmptyUploadBox label={`${t("video.referenceImage")} 0/${max}`} uploading={uploading} tilt={!compact} compact={compact} onUpload={onUpload} />
+      <EmptyUploadBox label={`${t("video.referenceImage")} 0/${max}`} uploading={uploading} tilt={!compact} compact={compact} multiple={max > 1} onUpload={onUpload} />
     );
   }
 
@@ -218,6 +222,7 @@ export function VideoUploadArea({
   media,
   onChange,
   mode,
+  showBudgetNotice = true,
   portraitAssetId,
   portraitAssetType,
   onPortraitAssetIdChange,
@@ -229,6 +234,7 @@ export function VideoUploadArea({
   media: VideoMediaState;
   onChange: (next: VideoMediaState) => void;
   mode?: string;
+  showBudgetNotice?: boolean;
   portraitAssetId?: string;
   portraitAssetType?: "image" | "video";
   onPortraitAssetIdChange?: (value: string) => void;
@@ -236,10 +242,21 @@ export function VideoUploadArea({
   draftTaskId?: string;
   onDraftTaskIdChange?: (value: string) => void;
 }) {
-  const { t } = useI18n();
+  const { t, ts } = useI18n();
   const [uploading, setUploading] = useState(false);
   const [portraitLibraryOpen, setPortraitLibraryOpen] = useState(false);
   const profile = config.upload_profile || "single_ref";
+  const referenceBudget = videoReferenceCapacity(config, media, mode);
+  const budgetNotice = !showBudgetNotice || referenceBudget.limit === undefined || ["image", "video", "audio"].includes(mode || "") ? null : (
+    <span role="status" className="w-full text-[11px] text-gray-500 dark:text-gray-400">
+      {t("video.materialBudget", { total: referenceBudget.total, limit: referenceBudget.limit, remaining: referenceBudget.remaining })}
+    </span>
+  );
+  const exceedsBudget = (count: number, room: number) => {
+    if (referenceBudget.limit === undefined || count <= room) return false;
+    alert(t("video.materialRemaining", { remaining: Math.max(0, room) }));
+    return true;
+  };
 
   const uploadOne = async (files: FileList | null, apply: (item: VideoMediaItem) => void) => {
     const f = files?.[0];
@@ -263,7 +280,8 @@ export function VideoUploadArea({
     apply: (items: VideoMediaItem[]) => void
   ) => {
     if (!files?.length) return;
-    const room = max - current.length;
+    const room = Math.min(max - current.length, referenceBudget.remaining);
+    if (exceedsBudget(files.length, room)) return;
     if (room <= 0) return;
     setUploading(true);
     try {
@@ -288,7 +306,8 @@ export function VideoUploadArea({
 
   const uploadMany = async (files: FileList | null, max: number) => {
     if (!files?.length) return;
-    const room = max - media.reference_images.length;
+    const room = Math.min(max - media.reference_images.length, referenceBudget.remaining);
+    if (exceedsBudget(files.length, room)) return;
     if (room <= 0) {
       alert(t("video.maxReferenceImages", { max }));
       return;
@@ -334,7 +353,8 @@ export function VideoUploadArea({
     );
   }
 
-  if (profile === "minimax_h3" || profile === "aliyun_multimodal" || profile.startsWith("aliyun_happyhorse_")) {
+  if (mode === "text" && ["multi_ref", "single_ref", "none"].includes(profile)) return null;
+  if (profile === "minimax_h3" || profile === "gateway_reference" || profile === "aliyun_multimodal" || profile.startsWith("aliyun_happyhorse_") || (profile === "seedance_2" && ["first_frame", "last_frame", "first_last", "reference"].includes(mode || "")) || (["multi_ref", "single_ref"].includes(profile) && ["first_frame", "first_last"].includes(mode || ""))) {
     const profileMode = profile === "aliyun_happyhorse_first_frame" ? "first_frame" : profile === "aliyun_happyhorse_reference" || profile === "aliyun_happyhorse_edit" ? "reference" : "text";
     const activeMode = mode || profileMode;
     if (activeMode === "text") return null;
@@ -369,26 +389,31 @@ export function VideoUploadArea({
       return (
         <ReferenceImageStack
           images={media.reference_images}
-          max={config.reference_images?.max ?? 9}
+          max={referenceBudget.reference_images}
           uploading={uploading}
-          onUpload={(files) => uploadMany(files, config.reference_images?.max ?? 9)}
+          onUpload={(files) => uploadMany(files, referenceBudget.reference_images)}
           onRemove={removeRef}
           compact
         />
       );
     }
+    const uses = (kind: string) => activeMode === "reference" || activeMode.split("_").includes(kind);
+    const showImages = uses("image") && (referenceBudget.reference_images > 0 || media.reference_images.length > 0);
+    const showVideos = uses("video") && (referenceBudget.reference_videos > 0 || media.reference_videos.length > 0);
+    const showAudios = uses("audio") && profile !== "aliyun_happyhorse_edit" && (referenceBudget.reference_audios > 0 || media.reference_audios.length > 0);
     return (
       <div className="flex min-h-14 w-fit max-w-full flex-wrap items-center gap-1.5">
-        <ReferenceImageStack
+        {budgetNotice}
+        {showImages && <ReferenceImageStack
           images={media.reference_images}
-          max={config.reference_images?.max ?? 9}
+          max={referenceBudget.reference_images}
           uploading={uploading}
-          onUpload={(files) => uploadMany(files, config.reference_images?.max ?? 9)}
+          onUpload={(files) => uploadMany(files, referenceBudget.reference_images)}
           onRemove={removeRef}
           compact
-        />
-        <ArrowRight size={13} className="shrink-0 text-gray-300" />
-        <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
+        />}
+        {showImages && showVideos && <ArrowRight size={13} className="shrink-0 text-gray-300" />}
+        {showVideos && <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
           {media.reference_videos.map((item, index) => (
             <FilledFileCard
               key={item.url}
@@ -397,22 +422,22 @@ export function VideoUploadArea({
               onRemove={() => onChange({ ...media, reference_videos: media.reference_videos.filter((_, i) => i !== index) })}
             />
           ))}
-          {media.reference_videos.length < (config.reference_videos?.max ?? 3) && (
+          {media.reference_videos.length < (referenceBudget.reference_videos) && (
             <EmptyUploadBox
-              label={`${t("video.referenceVideo")} ${media.reference_videos.length}/${config.reference_videos?.max ?? 3}`}
+              label={`${t("video.referenceVideo")} ${media.reference_videos.length}/${referenceBudget.reference_videos}`}
               compact
               accept={VIDEO_ACCEPT}
               uploading={uploading}
               onUpload={(files) =>
-                uploadFiles(files, "video", media.reference_videos, config.reference_videos?.max ?? 3, (items) =>
+                uploadFiles(files, "video", media.reference_videos, referenceBudget.reference_videos, (items) =>
                   onChange({ ...media, reference_videos: items })
                 )
               }
             />
           )}
-        </div>
-        {profile !== "aliyun_happyhorse_edit" && <ArrowRight size={13} className="shrink-0 text-gray-300" />}
-        {profile !== "aliyun_happyhorse_edit" && <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
+        </div>}
+        {(showImages || showVideos) && showAudios && <ArrowRight size={13} className="shrink-0 text-gray-300" />}
+        {showAudios && <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
           {media.reference_audios.map((item, index) => (
             <FilledFileCard
               key={item.url}
@@ -421,14 +446,14 @@ export function VideoUploadArea({
               onRemove={() => onChange({ ...media, reference_audios: media.reference_audios.filter((_, i) => i !== index) })}
             />
           ))}
-          {media.reference_audios.length < (config.reference_audios?.max ?? 3) && (
+          {media.reference_audios.length < (referenceBudget.reference_audios) && (
             <EmptyUploadBox
-              label={`${t("video.referenceAudio")} ${media.reference_audios.length}/${config.reference_audios?.max ?? 3}`}
+              label={`${t("video.referenceAudio")} ${media.reference_audios.length}/${referenceBudget.reference_audios}`}
               compact
               accept={AUDIO_ACCEPT}
               uploading={uploading}
               onUpload={(files) =>
-                uploadFiles(files, "audio", media.reference_audios, config.reference_audios?.max ?? 3, (items) =>
+                uploadFiles(files, "audio", media.reference_audios, referenceBudget.reference_audios, (items) =>
                   onChange({ ...media, reference_audios: items })
                 )
               }
@@ -443,11 +468,11 @@ export function VideoUploadArea({
     const activeMode = mode || "text";
     const imageModes = new Set(["image", "image_audio", "image_video", "image_video_audio"]);
     const videoModes = new Set(["video", "video_audio", "image_video", "image_video_audio"]);
-    const audioModes = new Set(["image_audio", "video_audio", "image_video_audio"]);
+    const audioModes = new Set(["audio", "image_audio", "video_audio", "image_video_audio"]);
     const showImages = imageModes.has(activeMode);
     const showVideos = videoModes.has(activeMode);
     const showAudios = audioModes.has(activeMode);
-    const showPortrait = showImages || showVideos;
+    const showPortrait = (showImages || showVideos) && !!onPortraitAssetIdChange;
     if (activeMode === "text") return null;
     if (activeMode === "draft_task") {
       return (
@@ -470,6 +495,7 @@ export function VideoUploadArea({
     return (
       <>
       <div className="flex min-h-14 w-fit max-w-full flex-wrap items-center gap-1.5">
+        {budgetNotice}
         {showPortrait && (
           <div className="shrink-0">
             {portraitAssetId ? (
@@ -500,9 +526,9 @@ export function VideoUploadArea({
         {showImages && (
           <ReferenceImageStack
             images={media.reference_images}
-            max={config.reference_images?.max ?? 9}
+            max={referenceBudget.reference_images}
             uploading={uploading}
-            onUpload={(files) => uploadMany(files, config.reference_images?.max ?? 9)}
+            onUpload={(files) => uploadMany(files, referenceBudget.reference_images)}
             onRemove={removeRef}
             compact
           />
@@ -518,14 +544,14 @@ export function VideoUploadArea({
                 onRemove={() => onChange({ ...media, reference_videos: media.reference_videos.filter((_, i) => i !== index) })}
               />
             ))}
-            {media.reference_videos.length < (config.reference_videos?.max ?? 3) && (
+            {media.reference_videos.length < (referenceBudget.reference_videos) && (
               <EmptyUploadBox
-                label={`${t("video.referenceVideo")} ${media.reference_videos.length}/${config.reference_videos?.max ?? 3}`}
+                label={`${t("video.referenceVideo")} ${media.reference_videos.length}/${referenceBudget.reference_videos}`}
                 compact
                 accept={VIDEO_ACCEPT}
                 uploading={uploading}
                 onUpload={(files) =>
-                  uploadFiles(files, "video", media.reference_videos, config.reference_videos?.max ?? 3, (items) =>
+                  uploadFiles(files, "video", media.reference_videos, referenceBudget.reference_videos, (items) =>
                     onChange({ ...media, reference_videos: items })
                   )
                 }
@@ -544,14 +570,14 @@ export function VideoUploadArea({
                 onRemove={() => onChange({ ...media, reference_audios: media.reference_audios.filter((_, i) => i !== index) })}
               />
             ))}
-            {media.reference_audios.length < (config.reference_audios?.max ?? 3) && (
+            {media.reference_audios.length < (referenceBudget.reference_audios) && (
               <EmptyUploadBox
-                label={`${t("video.referenceAudio")} ${media.reference_audios.length}/${config.reference_audios?.max ?? 3}`}
+                label={`${t("video.referenceAudio")} ${media.reference_audios.length}/${referenceBudget.reference_audios}`}
                 compact
                 accept={AUDIO_ACCEPT}
                 uploading={uploading}
                 onUpload={(files) =>
-                  uploadFiles(files, "audio", media.reference_audios, config.reference_audios?.max ?? 3, (items) =>
+                  uploadFiles(files, "audio", media.reference_audios, referenceBudget.reference_audios, (items) =>
                     onChange({ ...media, reference_audios: items })
                   )
                 }

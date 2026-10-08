@@ -1837,7 +1837,7 @@ func estimateCostFromPriceRule(rule map[string]interface{}, params map[string]in
 		}
 		return cost * multiplier
 	case "per_second":
-		unit := floatValue(rule["unit_price"])
+		unit := resolutionTierPrice(rule, params, "unit_price_by_resolution", "unit_price")
 		duration := parseDurationSeconds(params)
 		n := floatValue(params["count"])
 		if n <= 0 {
@@ -1848,7 +1848,7 @@ func estimateCostFromPriceRule(rule map[string]interface{}, params map[string]in
 		}
 		return unit * duration * n
 	case "per_request":
-		return floatValue(rule["unit_price"])
+		return durationTierPrice(rule, params, "unit_price_by_duration", "unit_price")
 	case "dynamic":
 		return estimateDynamicCost(rule, params)
 	default:

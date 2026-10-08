@@ -185,6 +185,7 @@ export function SystemAssetLibraryDialog({
     if (item.disabled || disabled.has(keyOf(item))) return;
     const exists = draft.some((entry) => keyOf(entry) === keyOf(item));
     if (exists) return setDraft((current) => current.filter((entry) => keyOf(entry) !== keyOf(item)));
+    if (maxSelected <= 0) return;
     if (maxSelected <= 1) return setDraft([item]);
     setDraft((current) => [...current, item].slice(0, maxSelected));
   };

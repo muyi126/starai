@@ -89,6 +89,12 @@ func ValidateVideoParams(model *ModelFull, params map[string]interface{}) error 
 	}
 	normalizeVideoSchemaParamTypes(model.InputSchema, params)
 	cfg := parseVideoRuntimeConfig(model.RuntimeRule)
+	if strings.EqualFold(parseUpstreamConfig(model.RuntimeRule).Adapter, "zex_video") {
+		if err := validateZexVideoParams(model, cfg, params); err != nil {
+			return err
+		}
+		return validateSchemaParams(model.InputSchema, params)
+	}
 	if err := validateVideoUpload(cfg, params); err != nil {
 		return err
 	}
@@ -103,7 +109,7 @@ func normalizeVideoSchemaParamTypes(inputSchema map[string]interface{}, params m
 	durationProp, _ := props["duration"].(map[string]interface{})
 	enumValues, _ := durationProp["enum"].([]interface{})
 	current, exists := params["duration"]
-	if !exists || enumContains(enumValues, current) {
+	if !exists || (enumContains(enumValues, current) && validSchemaValue(durationProp, current)) {
 		return
 	}
 	currentSeconds, ok := schemaDurationSeconds(current)
@@ -409,6 +415,9 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 	}
 
 	switch cfg.UploadProfile {
+	case "gateway_reference":
+		// The gateway validator also checks combined media and mode restrictions.
+		return nil
 	case "none":
 		return nil
 	case "first_frame":

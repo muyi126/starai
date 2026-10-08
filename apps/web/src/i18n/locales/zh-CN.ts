@@ -899,7 +899,7 @@ const dictionary: Record<string, string> = {
     "video.option.orientation.portrait": "竖屏",
     "video.option.orientation.landscape": "横屏",
     "video.generationMode": "素材组合",
-    "video.generationModeDesc": "选择官方支持的文本、图片、视频、音频或样片任务组合",
+    "video.generationModeDesc": "选择素材组合并上传对应素材，可用组合由模型配置决定。",
     "video.portraitAsset": "人像形象",
     "video.portraitImage": "人像图片",
     "video.portraitVideo": "人像视频",
@@ -1149,6 +1149,17 @@ Object.assign(dictionary, {
   "upscale.noAssets": "资产库暂无视频",
   "upscale.historyTitle": "历史高清任务",
   "upscale.noHistory": "暂无历史任务"
+});
+
+Object.assign(dictionary, {
+  "video.materialBudget": "图片、视频、音频合计 {total}/{limit} 项，还可添加 {remaining} 项",
+  "video.materialRemaining": "最多还能添加 {remaining} 项素材，图片、视频、音频共用额度",
+  "video.materialLimit": "图片、视频、音频素材合计最多 {limit} 项",
+  "workspace.estimatePerRun": "预估 {value} 算力 / 次",
+  "workspace.estimateAmount": "预估 {value} 算力",
+  "pricing.durationSeconds": "{seconds} 秒",
+  "pricing.imageCount": "{count} 张",
+  "pricing.currencyCny": "{value} 元"
 });
 
 export default dictionary;

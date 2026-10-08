@@ -87,6 +87,10 @@ export interface Model {
 export interface PriceRule {
   billing_type: 'per_token' | 'per_image' | 'per_request' | 'per_second' | 'dynamic';
   unit_price?: number;
+  /** Fixed per-request video prices keyed by the selected duration in seconds. */
+  unit_price_by_duration?: Record<string, number>;
+  /** Video unit prices per request or second, keyed by selected resolution. */
+  unit_price_by_resolution?: Record<string, number>;
   /** Per-token prices (legacy, tiny decimals). Prefer *_per_m below in admin. */
   input_price?: number;
   output_price?: number;
@@ -120,6 +124,8 @@ export interface Message {
 export interface Task {
   task_no: string;
   upstream_task_id?: string;
+  model_code?: string;
+  model_name?: string;
   user_name?: string;
   user_email?: string;
   type: string;

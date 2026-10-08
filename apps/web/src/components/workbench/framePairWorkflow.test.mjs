@@ -1,6 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { framePairSegmentCount, framePairTaskParams, framePairVideoSize, normalizeFramePairShots, supportsFramePair, validateFramePairShots } from "./framePairWorkflow.ts";
+import { MULTIMEDIA_TEMPLATES } from "../../../../admin/src/lib/multimedia-templates.ts";
+
+test("Zex size menus use configured resolution options and retain future expansions", () => {
+  for (const template of MULTIMEDIA_TEMPLATES.filter(t => t.runtime.upstream.adapter === "zex_video")) {
+    const model = { input_schema: template.schema, default_params: template.defaults };
+    const control = framePairVideoSize(model);
+    assert.deepEqual([...new Set(control.options.map(o => o.params.resolution))], template.schema.properties.resolution.enum);
+    assert.equal(control.params.resolution, template.defaults.resolution);
+    const expanded = { ...model, input_schema: { ...model.input_schema, properties: { ...model.input_schema.properties, resolution: { ...model.input_schema.properties.resolution, enum: [...model.input_schema.properties.resolution.enum, "1080p"] } } }, default_params: { ...model.default_params, resolution: "1080p" } };
+    assert.equal(framePairVideoSize(expanded).params.resolution, "1080p");
+  }
+});
+
+test("gateway frame-pair tools obey model mode capabilities", () => {
+  const model = { runtime_rule: { video: { upload_profile: "gateway_reference" } }, input_schema: { properties: { generation_mode: { enum: ["text", "first_frame", "first_last", "reference"] } } } };
+  assert.equal(supportsFramePair(model), true);
+  const [shot] = normalizeFramePairShots([{ prompt: "move", firstFrameUrl: "first.jpg", lastFrameUrl: "last.jpg", duration: 10 }]);
+  assert.equal(framePairTaskParams(model, {}, shot).generation_mode, "first_last");
+  for (const modes of [["text", "reference"], ["text", "first_frame", "reference"], ["text", "first_frame"]]) {
+    assert.equal(supportsFramePair({ ...model, input_schema: { properties: { generation_mode: { enum: modes } } } }), false);
+  }
+});
 
 test("normalizes and validates professional frame-pair shots", () => {
   const shots = normalizeFramePairShots([{ id: "a", prompt: "push in", firstFrameUrl: "first.jpg", lastFrameUrl: "last.jpg", duration: 8 }]);

@@ -21,7 +21,8 @@ const dictionarySource = fs.readFileSync(dictionaryPath, "utf8");
 const zhStart = dictionarySource.indexOf("const dictionary:");
 const zhEnd = dictionarySource.indexOf("\n};", zhStart);
 if (zhStart < 0 || zhEnd < 0) throw new Error("zh UI dictionary not found");
-const zhBlock = dictionarySource.slice(zhStart, zhEnd + 3);
+// Include Object.assign supplements below the initial dictionary too.
+const zhBlock = dictionarySource.slice(zhStart);
 for (const match of zhBlock.matchAll(/^\s*("(?:[^"\\]|\\.)*"):\s*("(?:[^"\\]|\\.)*")\s*,?$/gm)) {
   catalog[JSON.parse(match[1])] = JSON.parse(match[2]);
 }
@@ -71,6 +72,19 @@ function walk(dir) {
   }
 }
 walk(webSrc);
+// Config-driven labels may only appear as source dictionary keys, rather than
+// literal ts("...") calls. Register them for admin overrides and backfill too.
+function walkSourceKeys(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkSourceKeys(full);
+    else if (entry.name.endsWith(".ts")) {
+      const text = fs.readFileSync(full, "utf8");
+      for (const match of text.matchAll(/^\s*("(?:[^"\\]|\\.)*"):\s*/gm)) addSourceValue(JSON.parse(match[1]));
+    }
+  }
+}
+walkSourceKeys(path.join(webSrc, "i18n/source-locales"));
 if (!Object.keys(catalog).length) throw new Error("UI translation catalog is empty");
 const output = `${JSON.stringify(catalog, null, 2)}\n`;
 if (process.argv.includes("--check")) {

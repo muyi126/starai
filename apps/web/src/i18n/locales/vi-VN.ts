@@ -767,7 +767,7 @@ const dictionary: Record<string, string> = {
     "video.option.orientation.portrait": "Dọc",
     "video.option.orientation.landscape": "Ngang",
     "video.generationMode": "Tổ hợp đầu vào",
-    "video.generationModeDesc": "Chọn tổ hợp văn bản, ảnh, video, âm thanh hoặc tác vụ mẫu được hỗ trợ chính thức",
+    "video.generationModeDesc": "Chọn tổ hợp đầu vào và tải lên nội dung tương ứng. Các tổ hợp khả dụng phụ thuộc vào cấu hình mô hình.",
     "video.portraitAsset": "Nhân vật",
     "video.portraitImage": "Ảnh nhân vật",
     "video.portraitVideo": "Video nhân vật",
@@ -986,5 +986,16 @@ Object.assign(dictionary, {
 });
 
 Object.assign(dictionary, canvas, workspace, account);
+
+Object.assign(dictionary, {
+  "video.materialBudget": "Ảnh, video và âm thanh: {total}/{limit} mục; có thể thêm {remaining} mục",
+  "video.materialRemaining": "Bạn có thể thêm {remaining} mục. Ảnh, video và âm thanh dùng chung giới hạn.",
+  "video.materialLimit": "Tổng số ảnh, video và âm thanh không được vượt quá {limit} mục.",
+  "workspace.estimatePerRun": "Ước tính {value} điểm / lần",
+  "workspace.estimateAmount": "Ước tính {value} điểm",
+  "pricing.durationSeconds": "{seconds} giây",
+  "pricing.imageCount": "{count} ảnh",
+  "pricing.currencyCny": "{value} NDT"
+});
 
 export default dictionary;

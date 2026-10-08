@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/starai/worker/videoparams"
 )
 
 // Keep task/file identifiers exact even when a gateway emits int64 JSON numbers.
@@ -24,6 +26,25 @@ func decodeMediaResponse(body []byte) (map[string]interface{}, error) {
 func upstreamMediaConfig(rule map[string]interface{}) map[string]interface{} {
 	up, _ := rule["upstream"].(map[string]interface{})
 	return up
+}
+
+// A failed provider job is terminal even when its message mentions a timeout.
+type upstreamTerminalError struct{ message string }
+
+func (e *upstreamTerminalError) Error() string { return e.message }
+
+// Queue redelivery resumes an acknowledged gateway job; it must not POST again.
+func resumeZexVideoAttempt(routes []workerModelRoute, routeID int64, jobID string, p ImageTaskPayload) (workerGenerationAttemptResult, error) {
+	for _, route := range routes {
+		if route.ID != routeID || !strings.EqualFold(stringAny(upstreamMediaConfig(route.RuntimeRule)["adapter"]), "zex_video") {
+			continue
+		}
+		payload := videoparams.BuildUpstreamVideoPayload(p.ModelCode, route.UpstreamModel, route.RuntimeRule, route.ExtraParams, p.Input)
+		body, _ := json.Marshal(map[string]interface{}{"id": jobID, "status": "queued"})
+		return workerGenerationAttemptResult{Route: route, RuntimeRule: route.RuntimeRule, Connection: route.Connection, Endpoint: route.Endpoint,
+			UpstreamModel: stringAny(payload["model"]), ResponseBody: body, StatusCode: 200, UpstreamTaskID: jobID, GenerationCount: 1, RequestCount: 1}, nil
+	}
+	return workerGenerationAttemptResult{}, fmt.Errorf("已接单任务的原线路不可用，请恢复原线路后重试查询；不会重复提交生成")
 }
 
 // A small dot-path reader suffices for custom gateways; numeric segments index arrays.
@@ -62,10 +83,19 @@ func mappedMediaResponse(raw map[string]interface{}, mapping map[string]interfac
 		out["_mapped_media_data"] = nil
 	}
 	for field, pathValue := range mapping {
-		path, _ := pathValue.(string)
-		value := mediaResponseValue(raw, path)
-		if value == nil {
-			value = mediaResponseValue(unwrapUpstreamBody(raw), path)
+		var value interface{}
+		paths := stringSlice(pathValue)
+		if path, ok := pathValue.(string); ok {
+			paths = []string{path}
+		}
+		for _, path := range paths {
+			value = mediaResponseValue(raw, path)
+			if value == nil {
+				value = mediaResponseValue(unwrapUpstreamBody(raw), path)
+			}
+			if value != nil && value != "" {
+				break
+			}
 		}
 		if value == nil {
 			continue

@@ -3247,9 +3247,9 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		}
 		return cost * count
 	case "per_second":
-		return floatAny(rule["unit_price"]) * workerBillableSeconds(params)
+		return workerResolutionTierPrice(rule, params, "unit_price_by_resolution", "unit_price") * workerBillableSeconds(params)
 	case "per_request":
-		return floatAny(rule["unit_price"])
+		return workerDurationTierPrice(rule, params, "unit_price_by_duration", "unit_price")
 	case "dynamic":
 		return estimateDynamicPriceRuleCostWorker(rule, params)
 	default:
@@ -3334,6 +3334,25 @@ func workerImageTierValue(rule, params map[string]interface{}, tierMapKey, fallb
 			if strings.EqualFold(strings.TrimSpace(key), tier) {
 				return floatAny(value)
 			}
+		}
+	}
+	return floatAny(rule[fallbackKey])
+}
+
+func workerDurationTierPrice(rule, params map[string]interface{}, tierMapKey, fallbackKey string) float64 {
+	if prices, ok := rule[tierMapKey].(map[string]interface{}); ok {
+		if value, exists := prices[strconv.FormatFloat(workerDurationSeconds(params), 'f', -1, 64)]; exists {
+			return floatAny(value)
+		}
+	}
+	return workerResolutionTierPrice(rule, params, fallbackKey+"_by_resolution", fallbackKey)
+}
+
+func workerResolutionTierPrice(rule, params map[string]interface{}, tierMapKey, fallbackKey string) float64 {
+	resolution := strings.ToLower(strings.TrimSpace(stringAny(params["resolution"])))
+	if prices, ok := rule[tierMapKey].(map[string]interface{}); ok {
+		if value, exists := prices[resolution]; exists {
+			return floatAny(value)
 		}
 	}
 	return floatAny(rule[fallbackKey])

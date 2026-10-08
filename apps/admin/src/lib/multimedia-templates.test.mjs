@@ -1,13 +1,104 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, clearTemplateConnection, clearMediaTemplateRuntime } from "./multimedia-templates.ts";
+import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, configureZexUploadProfile, clearTemplateConnection, clearMediaTemplateRuntime } from "./multimedia-templates.ts";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 
+test("Zex video templates encode gateway capabilities instead of vendor-native fields", () => {
+  const templates = MULTIMEDIA_TEMPLATES.filter((item) => item.runtime.upstream.adapter === "zex_video");
+  assert.equal(templates.length, 8);
+  for (const item of templates) {
+    assert.equal(item.endpoint, "/v1/videos");
+    assert.equal(item.runtime.upstream.poll_path, "/v1/videos/{id}");
+    assert.equal(item.runtime.video.upload_profile, "aliyun_multimodal");
+    assert.deepEqual(item.runtime.upstream.response_map.media_url, ["url", "video_url"]);
+    assert.ok(item.schema.properties.duration.enum.includes(item.defaults.duration));
+    const resolutions = item.model.startsWith("minimax-") ? ["480p", "768p"] : ["480p", "720p"];
+    assert.deepEqual(item.schema.properties.resolution.enum, resolutions);
+    assert.equal(item.schema.properties.resolution["x-widget"], "option_menu");
+    assert.equal(item.defaults.resolution, resolutions[0]);
+    assert.equal(item.schema.properties.resolution.default, item.defaults.resolution);
+    assert.equal(item.runtime.upstream.result_path, undefined);
+    assert.equal(item.billing, ["zex_seedance_2_5", "zex_seedance_2_0"].includes(item.key) ? "per_request" : "per_second");
+    assert.equal(item.connection.auth_type, "bearer");
+  }
+  const model = (name) => templates.find((item) => item.model === name);
+  for (const name of ["seedance-2.0", "seedance-2.0-mini"]) {
+    const applied = applyMultimediaTemplate({ new_api_model: "", new_api_extra_params: "{}", runtime_rule: "{}" }, model(name).key);
+    assert.deepEqual(JSON.parse(applied.price_rule), { billing_type: name === "seedance-2.0" ? "per_request" : "per_second", unit_price: 0, currency: "POINT", unit_price_by_resolution: { "480p": 0, "720p": 0 } });
+  }
+  assert.deepEqual(model("grok-imagine-video-1.5-lite").schema.properties.generation_mode.enum, ["text", "first_frame"]);
+  assert.equal(model("grok-imagine-video-1.5-fast").runtime.video.reference_max_duration, 10);
+  assert.equal(model("grok-imagine-video-1.5").runtime.video.max_reference_images, 7);
+  const seedance25 = templates.filter(item => item.key === "zex_seedance_2_5");
+  assert.equal(seedance25.length, 1);
+  assert.deepEqual(seedance25[0].schema.properties.duration.enum, [10, 15, 30]);
+  assert.equal(seedance25[0].defaults.duration, 10);
+  assert.equal(seedance25[0].runtime.upstream.model_template, "seedance-2.5-{duration}s");
+  assert.equal(seedance25[0].runtime.video.reference_videos.max, 0);
+  assert.equal(seedance25[0].runtime.video.reference_audios.max, 0);
+  const applied = applyMultimediaTemplate({ new_api_model: "", new_api_extra_params: "{}", runtime_rule: "{}" }, seedance25[0].key);
+  assert.deepEqual(JSON.parse(applied.price_rule), { billing_type: "per_request", unit_price: 0, currency: "POINT", unit_price_by_duration: { "10": 0, "15": 0, "30": 0 } });
+  for (const name of ["minimax-h3", "minimax-h3-max"]) {
+    assert.deepEqual(model(name).schema.properties.generation_mode.enum, ["text", "image", "video", "audio", "image_audio", "image_video", "video_audio", "image_video_audio", "reference"]);
+    assert.equal(model(name).runtime.video.max_reference_total, 9);
+    assert.equal(model(name).runtime.video.reference_videos.max, 9);
+    const applied = applyMultimediaTemplate({ new_api_model: "", new_api_extra_params: "{}", runtime_rule: "{}" }, model(name).key);
+    assert.deepEqual(JSON.parse(applied.price_rule), { billing_type: "per_second", unit_price: 0, currency: "POINT", unit_price_by_resolution: { "480p": 0, "768p": 0 } });
+  }
+});
+
+test("Zex upload shape changes existing material menus without replacing protocol, limits or prices", () => {
+  for (const template of MULTIMEDIA_TEMPLATES.filter(t => t.runtime.upstream.adapter === "zex_video")) {
+    const form = { ...applyMultimediaTemplate({ new_api_model: "", new_api_extra_params: "{}", runtime_rule: "{}" }, template.key), price_rule: '{"unit_price":3}' };
+    const reference = configureZexUploadProfile(form, "multi_ref");
+    assert.deepEqual(JSON.parse(reference.input_schema).properties.generation_mode.enum, template.model.startsWith("minimax-") ? ["text", "reference"] : template.schema.properties.generation_mode.enum);
+    const combination = configureZexUploadProfile(reference, "seedance_2");
+    const modes = JSON.parse(combination.input_schema).properties.generation_mode.enum;
+    assert.equal(modes.includes("first_last"), template.schema.properties.generation_mode.enum.includes("first_last"));
+    assert.equal(modes.includes("image_video_audio"), template.runtime.video.reference_videos.max > 0);
+    assert.equal(modes.includes("image"), template.schema.properties.generation_mode.enum.includes("reference"));
+    const restored = configureZexUploadProfile(combination,"aliyun_multimodal");
+    assert.deepEqual(JSON.parse(restored.input_schema).properties.generation_mode.enum, template.schema.properties.generation_mode.enum);
+    assert.equal(restored.price_rule,form.price_rule);
+    assert.deepEqual(JSON.parse(restored.runtime_rule).upstream,JSON.parse(form.runtime_rule).upstream);
+    assert.equal(JSON.parse(restored.runtime_rule).video.max_reference_total,template.runtime.video.max_reference_total);
+  }
+  const source = ts.createSourceFile("models.tsx",readFileSync(new URL("../app/admin/models/page.tsx",import.meta.url),"utf8"),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+  const declarations=[];
+  function visit(n) { if(ts.isVariableDeclaration(n) && ["getVideoRule","setVideoRule"].includes(n.name.getText(source))) declarations.push(`var ${n.getText(source)};`); ts.forEachChild(n,visit); }
+  visit(source);
+  const ctx={safeParseJson:(raw,fallback)=>{try{return JSON.parse(raw)}catch{return fallback}}};
+  vm.runInNewContext(ts.transpileModule(declarations.join("\n"),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
+  const original={upstream:{adapter:"zex_video",model_template:"seedance-2.5-{duration}s"}, video:{upload_profile:"aliyun_multimodal",count_toward_total:false,max_reference_total:9,reference_max_duration:10,frames:{first:{key:"start",max:1}},reference_images:{key:"refs",max:4},reference_videos:{max:0},reference_audios:{max:0}}};
+  const changed=JSON.parse(ctx.setVideoRule(JSON.stringify(original),{upload_profile:"seedance_2"}));
+  assert.equal(changed.video.max_reference_total,9);
+  assert.equal(changed.video.count_toward_total,false);
+  assert.equal(changed.video.reference_max_duration,10);
+  assert.equal(changed.video.frames.first.key,"start");
+  assert.equal(changed.video.reference_images.key,"refs");
+  assert.equal(changed.video.reference_videos.max,0);
+  assert.deepEqual(changed.upstream.adapter,original.upstream.adapter);
+});
+
+test("MiniMax multimodal menus reuse existing upload profiles and respect disabled media kinds", () => {
+  for (const key of ["zex_minimax_h3", "zex_minimax_h3_max"]) {
+    const original = applyMultimediaTemplate({ new_api_model: "", new_api_extra_params: "{}", runtime_rule: "{}" }, key);
+    const runtime = JSON.parse(original.runtime_rule);
+    runtime.video.reference_videos.max = 0;
+    const form = { ...original, runtime_rule: JSON.stringify(runtime), price_rule: '{"unit_price":0.08}' };
+    const configured = configureZexUploadProfile(form, "aliyun_multimodal");
+    assert.deepEqual(JSON.parse(configured.input_schema).properties.generation_mode.enum, ["text", "image", "audio", "image_audio", "reference"]);
+    assert.equal(configured.price_rule, form.price_rule);
+    assert.deepEqual(JSON.parse(configured.runtime_rule).upstream, runtime.upstream);
+    assert.deepEqual(JSON.parse(configureZexUploadProfile(form, "none").input_schema).properties.generation_mode.enum, ["text"]);
+  }
+});
+
 test("gateway templates retain credentials and explicit identity while resetting provider params and prices", () => {
   const current = { new_api_model: "custom-model-alias", runtime_rule: '{"upstream":{"adapter":"old","static":{"old":true}}}', new_api_extra_params: JSON.stringify({ connection: { base_url: "https://gateway.test", api_key: "test-key" }, custom: true }) };
-  assert.equal(MULTIMEDIA_TEMPLATES.length, 20);
+  assert.equal(MULTIMEDIA_TEMPLATES.length, 28);
   assert.equal(new Set(MULTIMEDIA_TEMPLATES.map((item) => item.key)).size, MULTIMEDIA_TEMPLATES.length);
   for (const template of MULTIMEDIA_TEMPLATES) {
     const form = applyMultimediaTemplate(current, template.key);
@@ -49,6 +140,70 @@ test("audio display preference preserves per-second billing and switching preser
   assert.equal(context.switchedPriceRule({ unit_price: 0 }, "per_request").unit_price, 0);
   assert.equal(context.switchedPriceRule({ input_price_per_m: 0, output_price_per_m: 0 }, "per_token").input_price_per_m, 0);
   assert.equal(context.switchedPriceRule({ input_price: 0.000002 }, "per_token").input_price_per_m, 2);
+  assert.deepEqual(context.switchedPriceRule({ unit_price: 0, unit_price_by_duration: { "10": 2, "15": 3, "30": 7 } }, "per_request").unit_price_by_duration, { "10": 2, "15": 3, "30": 7 });
+  for (const billing of ["per_request", "per_second"]) {
+    assert.deepEqual(context.switchedPriceRule({ unit_price: 0, unit_price_by_resolution: { "480p": 5.5, "720p": 8.75 } }, billing).unit_price_by_resolution, { "480p": 5.5, "720p": 8.75 });
+  }
+});
+
+test("editing resolution prices preserves the other tier and billing selection", () => {
+  const source = ts.createSourceFile("models.tsx", readFileSync(new URL("../app/admin/models/page.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let declaration, unitDeclaration;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "setVideoResolutionPrice") declaration = node;
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "setVideoPriceValue") unitDeclaration = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(declaration);
+  let form = { price_rule: '{"billing_type":"per_request","unit_price":3,"currency":"POINT"}', runtime_rule: '{"upstream":{"adapter":"zex_video"}}' };
+  const context = { resolutionPriceTiers: ["480p", "720p"], safeParseJson: JSON.parse, setForm: (update) => { form = update(form); } };
+  vm.runInNewContext(ts.transpileModule(`var ${declaration.getText(source)}; var ${unitDeclaration.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  context.setVideoResolutionPrice("480p", 5.5);
+  assert.deepEqual(JSON.parse(form.price_rule).unit_price_by_resolution, { "480p": 5.5, "720p": 3 });
+  context.setVideoResolutionPrice("720p", 8.75);
+  assert.deepEqual(JSON.parse(form.price_rule), { billing_type: "per_request", unit_price: 3, currency: "POINT", unit_price_by_resolution: { "480p": 5.5, "720p": 8.75 } });
+  assert.equal(form.runtime_rule, '{"upstream":{"adapter":"zex_video"}}');
+  form.price_rule = '{"billing_type":"per_second","unit_price":0.3,"currency":"POINT"}';
+  context.resolutionPriceTiers = ["480p", "768p", "2K"];
+  context.setVideoPriceValue("unit_price", 0.4);
+  context.setVideoResolutionPrice("480p", 0.1);
+  context.setVideoResolutionPrice("768p", 0.2);
+  assert.deepEqual(JSON.parse(form.price_rule), { billing_type: "per_second", unit_price: 0.4, currency: "POINT", unit_price_by_resolution: { "480p": 0.1, "768p": 0.2, "2K": 0.3 } });
+  context.setVideoPriceValue("unit_price", 0);
+  assert.equal(JSON.parse(form.price_rule).unit_price_by_resolution["768p"], 0.2);
+});
+
+test("editing Other cases route cost preserves the existing resolution costs", () => {
+  const source = ts.createSourceFile("routes.tsx", readFileSync(new URL("../components/ModelRoutesEditor.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let declaration;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "setCostField") declaration = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(declaration);
+  let form = { cost_rule: { billing_type: "per_second", unit_cost: 0.075 } };
+  const context = { resolutionPriceTiers: ["480p", "768p"], setForm: update => { form = update(form); } };
+  vm.runInNewContext(ts.transpileModule(`var ${declaration.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  context.setCostField("unit_cost", 0.1);
+  assert.deepEqual(JSON.parse(JSON.stringify(form.cost_rule)), { billing_type: "per_second", unit_cost: 0.1, unit_cost_by_resolution: { "480p": 0.075, "768p": 0.075 } });
+});
+
+test("existing MiniMax models without tier maps expose configurable resolution prices", () => {
+  const source = ts.createSourceFile("models.tsx", readFileSync(new URL("../app/admin/models/page.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let declaration;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "resolutionPriceTiers") declaration = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(declaration);
+  for (const identity of [{ model: "minimax-h3" }, { model: "minimax-h3-max" }, { model: "custom-alias", template: "zex_minimax_h3" }, { model: "custom-alias", template: "zex_minimax_h3_max" }]) {
+    const context = { form: { category: "video", new_api_model: identity.model, input_schema: '{"properties":{"resolution":{"enum":["480p","768p","2K","auto"]}}}' }, currentPriceRule: { billing_type: "per_second", unit_price: 0.2 }, currentRuntimeRule: { upstream: { adapter: "zex_video" }, template_key: identity.template }, safeParseJson: JSON.parse };
+    vm.runInNewContext(ts.transpileModule(`var ${declaration.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    assert.deepEqual(Array.from(context.resolutionPriceTiers), ["480p", "768p", "2K"]);
+  }
 });
 
 test("native protocols use exact request, poll, media and billing fields", () => {

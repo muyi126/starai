@@ -767,7 +767,7 @@ const dictionary: Record<string, string> = {
     "video.option.orientation.portrait": "縦向き",
     "video.option.orientation.landscape": "横向き",
     "video.generationMode": "素材の組み合わせ",
-    "video.generationModeDesc": "公式対応のテキスト・画像・動画・音声・サンプルタスクの組み合わせを選択",
+    "video.generationModeDesc": "素材の組み合わせを選び、対応する素材をアップロードしてください。選択肢はモデルの設定によって異なります。",
     "video.portraitAsset": "人物アセット",
     "video.portraitImage": "人物画像",
     "video.portraitVideo": "人物動画",
@@ -986,5 +986,16 @@ Object.assign(dictionary, {
 });
 
 Object.assign(dictionary, canvas, workspace, account);
+
+Object.assign(dictionary, {
+  "video.materialBudget": "画像・動画・音声：合計 {total}/{limit} 件、あと {remaining} 件追加できます",
+  "video.materialRemaining": "あと {remaining} 件追加できます。画像・動画・音声の上限は共通です。",
+  "video.materialLimit": "画像・動画・音声は合計 {limit} 件までです。",
+  "workspace.estimatePerRun": "概算 {value} クレジット / 回",
+  "workspace.estimateAmount": "概算 {value} クレジット",
+  "pricing.durationSeconds": "{seconds} 秒間",
+  "pricing.imageCount": "{count} 枚",
+  "pricing.currencyCny": "{value} 人民元"
+});
 
 export default dictionary;

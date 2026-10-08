@@ -11,6 +11,7 @@ export type MultimediaTemplate = {
   runtime: Record<string, any>;
   billing: "per_image" | "per_second" | "per_request" | "per_token";
   connection?: Record<string, unknown>;
+  priceRule?: Record<string, unknown>;
 };
 
 const field = (title: string, values: Array<string | number>, icon: string, order: number) => ({
@@ -29,7 +30,85 @@ const imageFields = { count: field("生成数量", [1], "layers", 1), aspect_rat
 const imageRuntime = { max_reference_images: 0, count_options: [1], count_max: 1, show_size_tier: false, supported_ratios: ["auto", "1:1", "16:9", "9:16"], allow_auto_ratio: true };
 const MINIMAX_IMAGE_RATIOS = ["1:1", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "21:9"];
 
+// Zex's /v1/videos contract differs from both Sora and the vendor-native APIs.
+const ZEX_VIDEO_MODELS = [
+  "grok-imagine-video-1.5", "grok-imagine-video-1.5-fast", "grok-imagine-video-1.5-lite",
+  "seedance-2.0", "seedance-2.0-mini", "seedance-2.5",
+  "minimax-h3", "minimax-h3-max",
+];
+const ZEX_MINIMAX_MODES = ["text", "image", "video", "audio", "image_audio", "image_video", "video_audio", "image_video_audio", "reference"];
+const zexVideoTemplates: MultimediaTemplate[] = ZEX_VIDEO_MODELS.map((model) => {
+  const grok = model.startsWith("grok-");
+  const lite = model.endsWith("-lite");
+  const fast = model.endsWith("-fast");
+  const minimax = model.startsWith("minimax-");
+  const multimodal = minimax || model.startsWith("seedance-2.0");
+  const seedance25 = model === "seedance-2.5";
+  const durations = seedance25 ? [10, 15, 30] : Array.from({ length: 12 }, (_, i) => i + 4);
+  const modes = minimax ? ZEX_MINIMAX_MODES : ["text", "first_frame", ...(!fast && !lite ? ["first_last"] : []), ...(!lite ? ["reference"] : [])];
+  const maxImages = lite ? 1 : grok ? 7 : multimodal ? 9 : 4;
+  const resolutions = minimax ? ["480p", "768p"] : ["480p", "720p"];
+  return {
+    key: `zex_${model.replaceAll(".", "_").replaceAll("-", "_")}`,
+    label: `章鱼哥 · ${model}${seedance25 ? "（10/15/30 秒）" : ""} 视频 JSON`, category: "video", endpoint: "/v1/videos", model: seedance25 ? "seedance-2.5-10s" : model,
+    description: `章鱼哥网关协议，seconds 使用字符串，完成后读取顶层 url/video_url。${seedance25 ? "工作台选择 10/15/30 秒，自动调用对应的 seedance-2.5-{时长}s 模型，每个时长分别配置固定售价，仅接收图片。" : lite ? "仅文生或单张首帧。" : fast ? "仅单张首帧；多图参考最长 10 秒。" : multimodal ? "图片、视频、音频参考合计最多 9 项。" : "支持首帧、首尾帧及最多 7 张参考图。"}当前分辨率支持 ${resolutions.join(" / ")}，默认 ${resolutions[0]}。可按上游配置扩展参数中的分辨率选项。`,
+    schema: {
+      ...schema({
+        generation_mode: { ...field("素材组合", modes, "layers", 0), ...(minimax ? { description: "选择参考素材组合，上传对应素材。" } : {}), enumLabels: { text: "文生视频", first_frame: "首帧", first_last: "首尾帧", reference: minimax ? "自由参考组合" : "参考内容", image: "图片 + 文本", video: "视频 + 文本", audio: "音频 + 文本", image_audio: "图片 + 音频", image_video: "图片 + 视频", video_audio: "视频 + 音频", image_video_audio: "图片 + 视频 + 音频" } },
+        duration: field("视频时长", durations, "clock", 1),
+        aspect_ratio: field("画面比例", ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "ratio", 2),
+        resolution: field("分辨率", resolutions, "4k", 3),
+      }), required: ["duration"],
+    },
+    defaults: { generation_mode: "text", duration: seedance25 ? 10 : 5, aspect_ratio: "16:9", resolution: resolutions[0] }, billing: seedance25 || model === "seedance-2.0" ? "per_request" : "per_second",
+    ...(seedance25 ? { priceRule: { unit_price_by_duration: { "10": 0, "15": 0, "30": 0 } } } : multimodal ? { priceRule: { unit_price_by_resolution: Object.fromEntries(resolutions.map(resolution => [resolution, 0])) } } : {}),
+    connection: { auth_type: "bearer" },
+    runtime: {
+      video: { ...video("aliyun_multimodal", maxImages), mode_param: "generation_mode", max_total_images: maxImages,
+        max_reference_total: multimodal ? 9 : maxImages, reference_max_duration: fast ? 10 : 0,
+        reference_videos: { key: "reference_videos", max: multimodal ? 9 : 0 }, reference_audios: { key: "reference_audios", max: multimodal ? 9 : 0 } },
+      upstream: { adapter: "zex_video", request_format: "json", include: ["duration", "aspect_ratio", "resolution"],
+        ...(seedance25 ? { model_template: "seedance-2.5-{duration}s" } : {}),
+        poll_path: "/v1/videos/{id}", poll_interval_sec: 5,
+        response_map: { task_id: "id", status: "status", progress: "progress", media_url: ["url", "video_url"] },
+        success_statuses: ["completed"], failure_statuses: ["failed"] },
+    },
+  };
+});
+
+// Upload shape uses the existing components; gateway protocol and prices stay put.
+export function configureZexUploadProfile<T extends { runtime_rule: string; input_schema: string; default_params: string; new_api_model?: string }>(form: T, profile: string): T {
+  const runtime = JSON.parse(form.runtime_rule || "{}");
+  if (runtime.upstream?.adapter !== "zex_video") return form;
+  const template = zexVideoTemplates.find(t => t.key === runtime.template_key || t.model === form.new_api_model);
+  const input = JSON.parse(form.input_schema || "{}");
+  const defaults = JSON.parse(form.default_params || "{}");
+  const video = runtime.video || {};
+  const key = video.mode_param || "generation_mode";
+  const property = input.properties?.[key] || {};
+  const minimax = template?.key.startsWith("zex_minimax_h3") === true;
+  const capabilities: string[] = minimax ? ["text", "reference"] : (template?.schema.properties as any)?.generation_mode?.enum || property.enum || ["text", "reference"];
+  let modes = [...capabilities];
+  if (profile === "none") modes = ["text"];
+  if (["multi_ref", "single_ref"].includes(profile)) modes = capabilities.filter(m => ["text", "first_frame", "first_last", "reference"].includes(m));
+  if (profile === "first_frame") modes = capabilities.filter(m => ["text", "first_frame"].includes(m));
+  if (profile === "frame_pair") modes = capabilities.filter(m => ["text", "first_frame", "first_last"].includes(m));
+  if (profile === "seedance_2" || (minimax && ["aliyun_multimodal", "gateway_reference"].includes(profile))) {
+    const combinations = ["image", "video", ...(minimax ? ["audio"] : []), "image_audio", "image_video", "video_audio", "image_video_audio"].filter(m =>
+      (!m.includes("image") || Number(video.reference_images?.max ?? video.max_reference_images ?? 0) > 0)
+      && (!m.includes("video") || Number(video.reference_videos?.max ?? 0) > 0)
+      && (!m.includes("audio") || Number(video.reference_audios?.max ?? 0) > 0));
+    modes = capabilities.filter(m => m !== "reference").concat(capabilities.includes("reference") ? combinations : []);
+    if (minimax && profile !== "seedance_2" && capabilities.includes("reference")) modes.push("reference");
+  }
+  const mode = modes.includes(defaults[key]) ? defaults[key] : modes[0] || "text";
+  input.properties = { ...input.properties, [key]: { ...property, title: "素材组合", enum: modes, default: mode, ...(minimax ? { description: "选择参考素材组合，上传对应素材。" } : {}),
+    enumLabels: { ...property.enumLabels, text: "文生视频", first_frame: "首帧", first_last: "首尾帧", reference: minimax ? "自由参考组合" : "参考内容", image: minimax ? "图片 + 文本" : "参考图片", video: minimax ? "视频 + 文本" : "参考视频", audio: "音频 + 文本", image_audio: "图片 + 音频", image_video: "图片 + 视频", video_audio: "视频 + 音频", image_video_audio: "图片 + 视频 + 音频" } } };
+  return { ...form, runtime_rule: JSON.stringify({ ...runtime, video: { ...video, upload_profile: profile } }, null, 2), input_schema: JSON.stringify(input, null, 2), default_params: JSON.stringify({ ...defaults, [key]: mode }, null, 2) };
+}
+
 export const MULTIMEDIA_TEMPLATES: MultimediaTemplate[] = [
+  ...zexVideoTemplates,
   ...[
     ["newapi_grok_image", "Grok", "grok-imagine-image"],
     ["newapi_doubao_image", "Doubao / Seedream", ""],
@@ -135,7 +214,7 @@ export function applyMultimediaTemplate<T extends { new_api_model: string; new_a
     new_api_extra_params: JSON.stringify({ ...extra, connection }, null, 2),
     input_schema: JSON.stringify(template.schema, null, 2), default_params: JSON.stringify(template.defaults, null, 2),
     runtime_rule: JSON.stringify({ ...template.runtime, template_key: key, capabilities: { web_search: false, deep_think: false }, ...(template.category === "image" ? { image: { ...template.runtime.image, interface_type: key } } : {}) }, null, 2),
-    price_rule: JSON.stringify(template.billing === "per_token" ? { billing_type: "per_token", input_price_per_m: 0, output_price_per_m: 0, currency: "POINT" } : { billing_type: template.billing, unit_price: 0, currency: "POINT" }, null, 2),
+    price_rule: JSON.stringify(template.billing === "per_token" ? { billing_type: "per_token", input_price_per_m: 0, output_price_per_m: 0, currency: "POINT" } : { billing_type: template.billing, unit_price: 0, currency: "POINT", ...template.priceRule }, null, 2),
   };
 }
 

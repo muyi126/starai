@@ -1,3 +1,4 @@
+import videoPricing from "./supplements/en-US/videoPricing.ts";
 import virtualTryOn from "./supplements/en-US/virtualTryOn.ts";
 import agentCanvas from "./supplements/en-US/agentCanvas.ts";
 import productRefine from "./supplements/en-US/productRefine.ts";
@@ -8,6 +9,8 @@ import agentWorkspace from "./supplements/en-US/agentWorkspace.ts";
 import commerceVideo from "./supplements/en-US/commerceVideo.ts";
 
 const sourceTranslations: Record<string, string> = {
+  "AI 大模型聚合平台": "AI model platform",
+  "一个入口完成对话理解、图片、视频、语音和音乐创作。": "Create conversations, images, videos, speech and music from one workspace.",
   "API 文档中心": "API Documentation",
   "聊天与文本": "Chat & text",
   "平台": "Platform",
@@ -535,5 +538,7 @@ Object.assign(sourceTranslations, photoStudio);
 Object.assign(sourceTranslations, virtualTryOnExtra);
 Object.assign(sourceTranslations, agentWorkspace);
 Object.assign(sourceTranslations, commerceVideo);
+
+Object.assign(sourceTranslations, videoPricing);
 
 export default sourceTranslations;

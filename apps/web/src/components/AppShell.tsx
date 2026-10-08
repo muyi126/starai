@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, ChevronLeft, Compass, FileText, Home, LayoutGrid, Menu, Search, Settings, WalletCards, X } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
-import { api, apiCached, apiForLocaleCached } from "@/lib/api";
+import { api, apiCached, apiForLocale, apiForLocaleCached } from "@/lib/api";
 import type { Model, User, Wallet } from "@starai/shared-types";
 import { clsx } from "clsx";
 import { agentDisplayCategory, AGENT_CATEGORIES, AGENT_CATEGORY_TAG, CATEGORIES, CATEGORY_TAG, MODEL_ICONS } from "./workbench/categoryMeta";
@@ -151,7 +151,7 @@ function useIsMobile() {
 export function AppShell({ children, selectedModelCode, selectedAgentCode, initialUser, initialWallet }: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const { t, td, locale } = useI18n();
+  const { t, td, ts, locale } = useI18n();
   const { site_name, site_description, api_docs_enabled, api_docs_operations } = useSiteBranding();
   const storedUser = useAuthStore((state) => state.user);
   const [bootstrapUser, setBootstrapUser] = useState<User | null>(initialUser || null);
@@ -357,12 +357,28 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode, initi
       return;
     }
     let active = true;
-    apiForLocaleCached<Model>(`/api/models/${activeModelCode}`, locale)
-      .then((item) => { if (active) setActiveModel(item || null); })
-      .catch((error) => {
-        if (active && error?.name !== "AbortError") setActiveModel(null);
-      });
-    return () => { active = false; };
+    let request = 0;
+    let refreshPending = false;
+    const loadModel = (refresh = false) => {
+      if (refresh && refreshPending) return;
+      if (refresh) refreshPending = true;
+      const current = ++request;
+      const path = `/api/models/${activeModelCode}`;
+      const response = refresh ? apiForLocale<Model>(path, locale, { cache: "no-store" }) : apiForLocaleCached<Model>(path, locale);
+      response.then((item) => { if (active && current === request) setActiveModel(item || null); })
+        .catch((error) => {
+          if (active && current === request && !refresh && error?.name !== "AbortError") setActiveModel(null);
+        }).finally(() => { if (refresh) refreshPending = false; });
+    };
+    const refreshModel = () => { if (document.visibilityState === "visible") loadModel(true); };
+    loadModel();
+    window.addEventListener("focus", refreshModel);
+    document.addEventListener("visibilitychange", refreshModel);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refreshModel);
+      document.removeEventListener("visibilitychange", refreshModel);
+    };
   }, [activeModelCode, locale]);
 
   useEffect(() => {
@@ -953,7 +969,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode, initi
           <div className="px-3.5 py-4 flex items-center justify-between border-b border-gray-50 dark:border-white/10">
             <SiteBrand
               href="/app"
-              subtitle={site_description || "AI 大模型聚合平台"}
+              subtitle={ts(site_description || "AI 大模型聚合平台")}
               nameClassName="font-bold text-gray-900 truncate"
               subtitleClassName="text-[10px] text-gray-400 truncate"
             />
@@ -1046,7 +1062,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode, initi
           {!collapsed && (
             <SiteBrand
               href="/app"
-              subtitle={site_description || "AI 大模型聚合平台"}
+              subtitle={ts(site_description || "AI 大模型聚合平台")}
               nameClassName="font-bold text-gray-900 truncate dark:text-gray-100"
               subtitleClassName="text-[10px] text-gray-400 truncate"
             />

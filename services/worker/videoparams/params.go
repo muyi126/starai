@@ -37,6 +37,9 @@ func BuildUpstreamVideoPayload(
 		}
 	}
 	include := upCfg.Include
+	if len(include) == 0 && strings.EqualFold(upCfg.Adapter, "zex_video") {
+		include = []string{"duration", "aspect_ratio", "resolution"}
+	}
 	if len(include) == 0 && !(strings.EqualFold(upCfg.Adapter, "native_media") && upCfg.IncludeSet) {
 		for k := range params {
 			if k != "prompt" {
@@ -76,6 +79,9 @@ func BuildUpstreamVideoPayload(
 	out = ApplyUpstreamTransforms(out, runtimeRule, params)
 	if strings.EqualFold(upCfg.Adapter, "dola_seedance_30s") {
 		return buildDolaSeedancePayload(params)
+	}
+	if strings.EqualFold(upCfg.Adapter, "zex_video") {
+		out = buildZexVideoPayload(out, params, runtimeRule)
 	}
 	if strings.EqualFold(upCfg.Adapter, "volcengine_seedance_2") || strings.EqualFold(upCfg.Adapter, "topenrouter_seedance_2") {
 		out = buildVolcengineSeedancePayload(out, params)
@@ -130,10 +136,53 @@ func BuildUpstreamVideoPayload(
 	if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" {
 		out["_video_upload_profile"] = uploadProfile
 	}
-	if strings.EqualFold(upCfg.Adapter, "native_media") || strings.EqualFold(upCfg.Adapter, "aliyun_wan_video") {
+	if strings.EqualFold(upCfg.Adapter, "native_media") || strings.EqualFold(upCfg.Adapter, "aliyun_wan_video") || strings.EqualFold(upCfg.Adapter, "zex_video") {
 		out["_native_media_payload"] = true
 	}
 	return SanitizeUpstreamPayload(out, "")
+}
+
+func buildZexVideoPayload(out, params, runtimeRule map[string]interface{}) map[string]interface{} {
+	video, _ := runtimeRule["video"].(map[string]interface{})
+	frames, _ := video["frames"].(map[string]interface{})
+	key := func(raw interface{}, fallback string) string {
+		config, _ := raw.(map[string]interface{})
+		if name, ok := config["key"].(string); ok && name != "" {
+			return name
+		}
+		return fallback
+	}
+	firstKey, lastKey := key(frames["first"], "first_frame"), key(frames["last"], "last_frame")
+	imageKey, videoKey, audioKey := key(video["reference_images"], "reference_images"), key(video["reference_videos"], "reference_videos"), key(video["reference_audios"], "reference_audios")
+	out["seconds"] = fmt.Sprint(normalizeVideoDuration(firstNonNil(params["duration"], params["seconds"])))
+	delete(out, "duration")
+	images := mediaURLList(params[imageKey])
+	first, last := firstMediaURL(params[firstKey]), firstMediaURL(params[lastKey])
+	if first != "" || last != "" {
+		images = nil
+		if first != "" {
+			images = append(images, first)
+		}
+		if last != "" {
+			images = append(images, last)
+		}
+		out["first_last_frame"] = true
+	} else {
+		delete(out, "first_last_frame")
+	}
+	for key, refs := range map[string][]string{"images": images, "videos": mediaURLList(params[videoKey]), "audios": mediaURLList(params[audioKey])} {
+		delete(out, key)
+		if len(refs) > 0 {
+			out[key] = refs
+		}
+	}
+	for _, key := range []string{"first_frame", "last_frame", "reference_images", "reference_videos", "reference_audios", "generation_mode", "count", "n"} {
+		delete(out, key)
+	}
+	for _, key := range []string{firstKey, lastKey, imageKey, videoKey, audioKey} {
+		delete(out, key)
+	}
+	return out
 }
 
 // Legacy Wan 2.1-2.6 uses named image fields, unlike the newer media array API.
@@ -473,11 +522,10 @@ func durationDigits(params, out map[string]interface{}) string {
 			return s
 		}
 	}
-	if d, ok := out["duration"].(int); ok && d > 0 {
-		return strconv.Itoa(d)
-	}
-	if d, ok := out["duration"].(float64); ok && d > 0 {
-		return strconv.Itoa(int(math.Round(d)))
+	for _, source := range []map[string]interface{}{params, out} {
+		if d, err := strconv.ParseFloat(fmt.Sprint(normalizeVideoDuration(source["duration"])), 64); err == nil && d > 0 && !math.IsNaN(d) && !math.IsInf(d, 0) {
+			return strconv.FormatFloat(math.Round(d), 'f', 0, 64)
+		}
 	}
 	return "12"
 }

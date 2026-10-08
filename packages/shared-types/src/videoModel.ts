@@ -10,6 +10,7 @@ export type VideoUploadProfile =
   | "omni_reference"
   | "seedance_2"
   | "minimax_h3"
+  | "gateway_reference"
   | "aliyun_multimodal"
   | "aliyun_happyhorse_text"
   | "aliyun_happyhorse_first_frame"
@@ -28,6 +29,8 @@ export interface VideoRuntimeConfig {
   min_reference_images?: number;
   max_reference_images?: number;
   max_total_images?: number;
+  /** Shared limit across reference images, videos and audios (including frames). */
+  max_reference_total?: number;
   count_toward_total?: boolean;
   prompt_hint?: string;
   prompt_required?: boolean;
@@ -123,6 +126,7 @@ export function parseVideoRuntime(runtimeRule?: Record<string, unknown>): VideoR
     min_reference_images: numOr(video.min_reference_images, 0),
     max_reference_images: numOr(video.max_reference_images, 1),
     max_total_images: numOr(video.max_total_images, 9),
+    max_reference_total: video.max_reference_total !== undefined ? Math.max(0, numOr(video.max_reference_total, 9)) : asRecord(runtimeRule?.upstream).adapter === "zex_video" ? 9 : undefined,
     count_toward_total: video.count_toward_total !== false,
     prompt_hint: typeof video.prompt_hint === "string" ? video.prompt_hint : "",
     prompt_required: video.prompt_required !== false,
@@ -148,6 +152,24 @@ export function parseVideoRuntime(runtimeRule?: Record<string, unknown>): VideoR
       max: numOr(refAudios.max, 3),
     },
     mode_param: strOr(video.mode_param, "generation_mode"),
+  };
+}
+
+export function videoReferenceCapacity(config: VideoRuntimeConfig, media: VideoMediaState, mode?: string) {
+  const active = (kind: string) => (kind === "image" || !["single_ref", "multi_ref"].includes(String(config.upload_profile)))
+    && (mode === undefined || mode === "reference" || mode.split("_").includes(kind));
+  const images = active("image") ? media.reference_images.length : 0;
+  const videos = active("video") ? media.reference_videos.length : 0;
+  const audios = active("audio") ? media.reference_audios.length : 0;
+  const frames = (mode === undefined || mode === "first_frame" || mode === "first_last" ? Number(!!media.first_frame) : 0)
+    + (mode === undefined || mode === "last_frame" || mode === "first_last" ? Number(!!media.last_frame) : 0);
+  const total = images + videos + audios + frames;
+  const remaining = config.max_reference_total === undefined ? Infinity : Math.max(0, config.max_reference_total - total);
+  return {
+    total, limit: config.max_reference_total, remaining,
+    reference_images: Math.min(config.reference_images?.max ?? config.max_reference_images ?? 1, images + remaining),
+    reference_videos: Math.min(config.reference_videos?.max ?? 3, videos + remaining),
+    reference_audios: Math.min(config.reference_audios?.max ?? 3, audios + remaining),
   };
 }
 
@@ -188,6 +210,18 @@ export function enumLabel(prop: SchemaFieldMeta, value: unknown): string {
   return prop.enumLabels?.[s] ?? s;
 }
 
+export function selectVideoTaskMedia(params: Record<string, unknown>, media: VideoMediaState, runtimeRule?: Record<string, unknown>): VideoMediaState {
+  if (asRecord(runtimeRule?.upstream).adapter !== "zex_video") return media;
+  const cfg = parseVideoRuntime(runtimeRule);
+  const mode = String(params[cfg.mode_param || "generation_mode"] || "text");
+  return mode === "text" || cfg.upload_profile === "none" ? EMPTY_VIDEO_MEDIA
+    : mode === "first_frame" || mode === "first_last" ? { ...EMPTY_VIDEO_MEDIA, first_frame: media.first_frame, last_frame: mode === "first_last" ? media.last_frame : null }
+    : { ...media, first_frame: null, last_frame: null,
+      reference_images: mode === "reference" || mode.split("_").includes("image") ? media.reference_images : [],
+      reference_videos: !["single_ref", "multi_ref"].includes(String(cfg.upload_profile)) && (mode === "reference" || mode.split("_").includes("video")) ? media.reference_videos : [],
+      reference_audios: !["single_ref", "multi_ref"].includes(String(cfg.upload_profile)) && (mode === "reference" || mode.split("_").includes("audio")) ? media.reference_audios : [] };
+}
+
 export function buildVideoTaskParams(
   params: Record<string, unknown>,
   media: VideoMediaState,
@@ -200,6 +234,10 @@ export function buildVideoTaskParams(
   const refVideoKey = cfg.reference_videos?.key || "reference_videos";
   const refAudioKey = cfg.reference_audios?.key || "reference_audios";
   const out: Record<string, unknown> = { ...params };
+  if (asRecord(runtimeRule?.upstream).adapter === "zex_video") {
+    for (const key of [firstKey, lastKey, refKey, refVideoKey, refAudioKey, "reference_video_duration_seconds"]) delete out[key];
+  }
+  media = selectVideoTaskMedia(params, media, runtimeRule);
   if (media.first_frame?.url) out[firstKey] = media.first_frame.url;
   if (media.last_frame?.url) out[lastKey] = media.last_frame.url;
   if (media.reference_images.length) out[refKey] = media.reference_images.map((x) => x.url);

@@ -79,11 +79,13 @@ function fieldTitle(t: Translate, ts: TranslateSource, key: string, prop: Schema
 function fieldDesc(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta) {
   const i18nKey = FIELD_DESC_KEY[key];
   const desc = (prop as SchemaFieldMeta & { description?: string }).description;
+  if (desc) return ts(desc);
   return i18nKey ? t(i18nKey) : ts(typeof (desc || prop.title) === "string" ? String(desc || prop.title) : key);
 }
 
 function optionLabel(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta, value: unknown) {
   const raw = String(value ?? "");
+  if (prop.enumLabels?.[raw]) return ts(prop.enumLabels[raw]);
   const lookup = `video.option.${key}.${raw}`;
   const translated = t(lookup);
   if (translated !== lookup) return translated;
@@ -162,7 +164,7 @@ function CountOptionMenu({
                     closeMenu();
                   }}
                 >
-                  OK
+                  {t("common.confirm")}
                 </button>
               </div>
             </div>

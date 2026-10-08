@@ -1,6 +1,7 @@
 import type { SystemConfig } from "@starai/shared-types";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+// Server requests can bypass public DNS/CDN/TLS; the browser keeps its public API URL.
+export const API_URL = process.env.INTERNAL_API_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 export type PublicSystemConfig = Partial<SystemConfig>;
 

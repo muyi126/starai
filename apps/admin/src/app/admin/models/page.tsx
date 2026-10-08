@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { adminApi, adminUploadFile } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 import { imageInterfaceType, withImageInterfaceType } from "@/lib/image-interface";
-import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, clearMediaTemplateRuntime, clearTemplateConnection } from "@/lib/multimedia-templates";
+import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, configureZexUploadProfile, clearMediaTemplateRuntime, clearTemplateConnection } from "@/lib/multimedia-templates";
 
 // Keep lazy loading inside the form; suspending the page detaches its portal ref.
 const UpstreamIncludeEditor = dynamic(() => import("@/components/UpstreamIncludeEditor").then(module => module.UpstreamIncludeEditor), {
@@ -128,7 +128,7 @@ function switchedPriceRule(current: Record<string, any>, billingType: ModelBilli
       output_price_per_m: Math.max(0, Number(current.output_price_per_m ?? Number(current.output_price ?? 0) * 1_000_000) || 0),
     };
   }
-  return { billing_type: billingType, currency, unit_price: Math.max(0, Number(current.unit_price ?? 1) || 0) };
+  return { billing_type: billingType, currency, unit_price: Math.max(0, Number(current.unit_price ?? 1) || 0), ...(billingType === "per_request" && current.unit_price_by_duration ? { unit_price_by_duration: current.unit_price_by_duration } : {}), ...(["per_request", "per_second"].includes(billingType) && current.unit_price_by_resolution ? { unit_price_by_resolution: current.unit_price_by_resolution } : {}) };
 }
 
 const SEEDANCE_TOKENS_PER_SECOND: Record<string, number> = {
@@ -1299,7 +1299,8 @@ export default function ModelsPage() {
     { value: "omni_reference", label: "Omni 参考图 1~7 张 (文生 / 参考图)" },
     { value: "seedance_2", label: "Seedance 2.0 多模态组合" },
     { value: "minimax_h3", label: "MiniMax-H3 V2 多模态组合" },
-    { value: "aliyun_multimodal", label: "阿里云 Wan 3.0 多模态组合" },
+    { value: "aliyun_multimodal", label: "首尾帧 / 多模态素材组合（Wan 等）" },
+    { value: "gateway_reference", label: "网关素材组合（兼容旧配置）" },
     { value: "aliyun_happyhorse_text", label: "HappyHorse 文生视频" },
     { value: "aliyun_happyhorse_first_frame", label: "HappyHorse 首帧生视频" },
     { value: "aliyun_happyhorse_reference", label: "HappyHorse 参考生视频" },
@@ -1317,7 +1318,7 @@ export default function ModelsPage() {
       min_reference_images: Number(video.min_reference_images ?? 0),
       max_reference_images: Number(video.max_reference_images ?? 1),
       max_total_images: Number(video.max_total_images ?? 9),
-      ref_slot_max: Number(ref.max ?? 4),
+      ref_slot_max: Number(ref.max ?? video.max_reference_images ?? 4),
       ref_video_max: Number(((video.reference_videos ?? {}) as Record<string, any>).max ?? 3),
       ref_audio_max: Number(((video.reference_audios ?? {}) as Record<string, any>).max ?? 3),
       mode_param: String(video.mode_param || "generation_mode"),
@@ -1367,6 +1368,10 @@ export default function ModelsPage() {
   const setVideoRule = (runtimeRuleText: string, patch: Partial<ReturnType<typeof getVideoRule>>) => {
     const cur = getVideoRule(runtimeRuleText);
     const next = { ...cur, ...patch };
+    if (cur.rr?.upstream?.adapter === "zex_video") {
+      if (patch.max_reference_images !== undefined) next.ref_slot_max = patch.max_reference_images;
+      else if (patch.ref_slot_max !== undefined) next.max_reference_images = patch.ref_slot_max;
+    }
     const include = Array.isArray(next.upstream_include)
       ? next.upstream_include.map((s) => String(s).trim()).filter(Boolean)
       : String(next.upstream_include || "")
@@ -1384,11 +1389,12 @@ export default function ModelsPage() {
       {
         ...rr,
         video: {
+          ...(rr?.video || {}),
           upload_profile: next.upload_profile,
           min_reference_images: next.min_reference_images,
           max_reference_images: next.max_reference_images,
           max_total_images: next.max_total_images,
-          count_toward_total: true,
+          count_toward_total: rr?.video?.count_toward_total !== false,
           prompt_hint: next.prompt_hint,
           prompt_required: next.prompt_required,
           show_channel: next.show_channel,
@@ -1397,12 +1403,13 @@ export default function ModelsPage() {
           count_allow_custom: next.count_allow_custom,
           count_max: Math.max(1, next.count_max || 50),
           frames: {
-            first: { key: "first_frame", label: "首帧", max: 1 },
-            last: { key: "last_frame", label: "尾帧", max: 1 },
+            ...(rr?.video?.frames || {}),
+            first: { key: "first_frame", label: "首帧", max: 1, ...(rr?.video?.frames?.first || {}) },
+            last: { key: "last_frame", label: "尾帧", max: 1, ...(rr?.video?.frames?.last || {}) },
           },
-          reference_images: { key: "reference_images", max: next.ref_slot_max },
-          reference_videos: { key: "reference_videos", max: next.ref_video_max },
-          reference_audios: { key: "reference_audios", max: next.ref_audio_max },
+          reference_images: { key: "reference_images", ...(rr?.video?.reference_images || {}), max: next.ref_slot_max },
+          reference_videos: { key: "reference_videos", ...(rr?.video?.reference_videos || {}), max: next.ref_video_max },
+          reference_audios: { key: "reference_audios", ...(rr?.video?.reference_audios || {}), max: next.ref_audio_max },
           mode_param: next.mode_param,
         },
         upstream: { ...(((rr?.upstream as Record<string, unknown>) ?? {}) as Record<string, unknown>), include, map: mapObj },
@@ -3116,6 +3123,7 @@ export default function ModelsPage() {
     const isSeedance2 =
       form.category === "video" &&
       parsedRuntimeRule?.upstream?.adapter !== "aliyun_video_generation" &&
+      parsedRuntimeRule?.upstream?.adapter !== "zex_video" &&
       (parsedRuntimeRule?.upstream?.adapter === "volcengine_seedance_2" ||
         parsedRuntimeRule?.video?.upload_profile === "seedance_2");
     if (isSeedance2) {
@@ -3156,6 +3164,7 @@ export default function ModelsPage() {
     }
     const isMiniMaxH3 =
       form.category === "video" &&
+      parsedRuntimeRule?.upstream?.adapter !== "zex_video" &&
       (parsedRuntimeRule?.upstream?.adapter === "minimax_h3_v2" ||
         parsedRuntimeRule?.video?.upload_profile === "minimax_h3");
     if (isMiniMaxH3) {
@@ -3737,11 +3746,16 @@ export default function ModelsPage() {
 
   const currentPriceRule = safeParseJson(form.price_rule, {}) as Record<string, any>;
   const currentRuntimeRule = safeParseJson(form.runtime_rule, {}) as Record<string, any>;
+  const isZexMiniMax = currentRuntimeRule.upstream?.adapter === "zex_video" && (/^minimax-h3(?:-max)?$/.test(form.new_api_model) || ["zex_minimax_h3", "zex_minimax_h3_max"].includes(currentRuntimeRule.template_key));
+  const resolutionPriceTiers: string[] = form.category === "video" && (currentPriceRule.unit_price_by_resolution || (currentRuntimeRule.upstream?.adapter === "zex_video" && (/^(?:seedance-2\.0(?:-mini)?|minimax-h3(?:-max)?)$/.test(form.new_api_model) || ["zex_seedance_2_0", "zex_seedance_2_0_mini", "zex_minimax_h3", "zex_minimax_h3_max"].includes(currentRuntimeRule.template_key))))
+    ? ((safeParseJson(form.input_schema, {}) as Record<string, any>).properties?.resolution?.enum || Object.keys(currentPriceRule.unit_price_by_resolution || {})).filter((value: unknown) => typeof value === "string" && value !== "auto")
+    : [];
   const seedanceVariant = inferSeedanceVariant(form.new_api_model, currentRuntimeRule, videoTemplateKey);
   const seedanceVariantConfig = getSeedanceVariantConfig(seedanceVariant);
   const seedancePriceRule = getSeedancePriceRule(form.price_rule, seedanceVariant);
   const isSeedanceVideoForm =
     form.category === "video" &&
+    currentRuntimeRule?.upstream?.adapter !== "zex_video" &&
     (videoTemplateKey.startsWith("volcengine_seedance_2_") ||
       getVideoRule(form.runtime_rule).upload_profile === "seedance_2" ||
       currentRuntimeRule?.upstream?.adapter === "volcengine_seedance_2");
@@ -3751,6 +3765,7 @@ export default function ModelsPage() {
   const miniMaxH3Variant: MiniMaxH3Variant = form.new_api_model === "MiniMax-H3-Max" ? "max" : "standard";
   const isMiniMaxH3VideoForm =
     form.category === "video" &&
+    currentRuntimeRule?.upstream?.adapter !== "zex_video" &&
     (videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY ||
       videoTemplateKey === MINIMAX_H3_MAX_TEMPLATE_KEY ||
       getVideoRule(form.runtime_rule).upload_profile === "minimax_h3" ||
@@ -3784,10 +3799,22 @@ export default function ModelsPage() {
       price_rule: JSON.stringify(switchedPriceRule(safeParseJson(prev.price_rule, {}) as Record<string, any>, billingType, dynamicDefault), null, 2),
     }));
   };
-  const setVideoPriceValue = (key: string, value: number | string) => setForm((prev) => ({
-    ...prev,
-    price_rule: JSON.stringify({ ...(safeParseJson(prev.price_rule, {}) as Record<string, any>), [key]: value }, null, 2),
-  }));
+  const setVideoPriceValue = (key: string, value: number | string) => setForm((prev) => {
+    const price = safeParseJson(prev.price_rule, {}) as Record<string, any>;
+    if (key === "unit_price" && resolutionPriceTiers.length > 0 && ["per_request", "per_second"].includes(price.billing_type) && !price.unit_price_by_duration) {
+      price.unit_price_by_resolution = { ...Object.fromEntries(resolutionPriceTiers.map(tier => [tier, price.unit_price_by_resolution?.[tier] ?? price.unit_price ?? 0])), ...price.unit_price_by_resolution };
+    }
+    return { ...prev, price_rule: JSON.stringify({ ...price, [key]: value }, null, 2) };
+  });
+  const setVideoDurationPrice = (duration: number, value: number) => setForm((prev) => {
+    const price = safeParseJson(prev.price_rule, {}) as Record<string, any>;
+    return { ...prev, price_rule: JSON.stringify({ ...price, unit_price_by_duration: { ...price.unit_price_by_duration, [duration]: value } }, null, 2) };
+  });
+  const setVideoResolutionPrice = (resolution: string, value: number) => setForm((prev) => {
+    const price = safeParseJson(prev.price_rule, {}) as Record<string, any>;
+    const prices = Object.fromEntries(resolutionPriceTiers.map((tier) => [tier, price.unit_price_by_resolution?.[tier] ?? price.unit_price ?? 0]));
+    return { ...prev, price_rule: JSON.stringify({ ...price, unit_price_by_resolution: { ...prices, ...price.unit_price_by_resolution, [resolution]: value } }, null, 2) };
+  });
   const setMiniMaxH3PriceValue = (key: string, value: string | number) => {
     setForm((prev) => {
       const current = safeParseJson(prev.price_rule, {}) as Record<string, any>;
@@ -4979,7 +5006,14 @@ export default function ModelsPage() {
                         <option value="dynamic">动态规则</option>
                       </select>
                     </label>
-                    {(["per_request", "per_second", "per_image"] as ModelBillingType[]).includes(videoBillingType) && (
+                    {videoBillingType === "per_request" && currentPriceRule.unit_price_by_duration ? (
+                      [10, 15, 30].map((duration) => <SeedancePriceInput key={duration} label={`${duration} 秒固定算力`} value={Number(currentPriceRule.unit_price_by_duration[duration] ?? 0)} step={0.01} onChange={(value) => setVideoDurationPrice(duration, value)} />)
+                    ) : ["per_request", "per_second"].includes(videoBillingType) && resolutionPriceTiers.length > 0 ? (
+                      <>
+                        {resolutionPriceTiers.map((resolution) => <SeedancePriceInput key={resolution} label={`${resolution} ${videoBillingType === "per_request" ? "每次" : "每秒"}算力`} value={Number(currentPriceRule.unit_price_by_resolution?.[resolution] ?? currentPriceRule.unit_price ?? 0)} step={0.000001} onChange={(value) => setVideoResolutionPrice(resolution, value)} />)}
+                        <SeedancePriceInput label={`其他情况（Other cases）${videoBillingType === "per_request" ? "每次" : "每秒"}算力`} value={Number(currentPriceRule.unit_price ?? 0)} step={0.000001} onChange={(value) => setVideoPriceValue("unit_price", value)} />
+                      </>
+                    ) : (["per_request", "per_second", "per_image"] as ModelBillingType[]).includes(videoBillingType) && (
                       <SeedancePriceInput
                         label={videoBillingType === "per_request" ? "每次算力" : videoBillingType === "per_second" ? "每秒算力" : "每个结果算力"}
                         value={Number(currentPriceRule.unit_price ?? 1)}
@@ -5003,6 +5037,8 @@ export default function ModelsPage() {
                   </div>
                   <div className="mt-2 text-[11px] leading-5 text-gray-500">
                     这里控制向用户扣费的模型价格规则；上游成本仍在“上游线路”的成本计费方式中独立配置。
+                    {resolutionPriceTiers.length > 0 && ["per_request", "per_second"].includes(videoBillingType) && (videoBillingType === "per_request" ? " 按次：按用户选择的分辨率收取固定费用，不乘视频时长。" : " 按秒：按用户选择的分辨率单价乘视频时长。")}
+                    {resolutionPriceTiers.length > 0 && ["per_request", "per_second"].includes(videoBillingType) && " 未匹配已配置分辨率时使用其他情况单价；新增分辨率选项后可分别设置价格。"}
                     {(isSeedanceVideoForm || isMiniMaxH3VideoForm) && videoBillingType !== "dynamic" && " 可随时切回动态规则以按官方用量精确计费。"}
                   </div>
                 </div>
@@ -5102,6 +5138,10 @@ export default function ModelsPage() {
                       value={getVideoRule(form.runtime_rule).upload_profile}
                       onChange={(e) => {
                         const profile = e.target.value;
+                        if (currentRuntimeRule?.upstream?.adapter === "zex_video") {
+                          setForm(prev => configureZexUploadProfile({ ...prev, runtime_rule: setVideoRule(prev.runtime_rule, { upload_profile: profile }) }, profile));
+                          return;
+                        }
                         if (profile === "veo_reference") {
                           setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
                           setForm((prev) => applyVeoReferenceV1(prev));
@@ -5129,9 +5169,9 @@ export default function ModelsPage() {
                         }));
                       }}
                     >
-                      {VIDEO_PROFILES.map((p) => (
+                      {VIDEO_PROFILES.filter(p => isZexMiniMax ? ["aliyun_multimodal", "multi_ref", "single_ref", "none"].includes(p.value) : currentRuntimeRule?.upstream?.adapter !== "zex_video" || ["aliyun_multimodal", "gateway_reference", "seedance_2", "multi_ref", "single_ref", "first_frame", "frame_pair", "none"].includes(p.value)).map((p) => (
                         <option key={p.value} value={p.value}>
-                          {p.label}
+                          {isZexMiniMax && p.value === "aliyun_multimodal" ? "多模态素材组合（章鱼哥 MiniMax）" : p.label}
                         </option>
                       ))}
                     </select>
@@ -5172,9 +5212,9 @@ export default function ModelsPage() {
                     </div>
                   </div>
                   <div>
-                    <label className="text-xs text-gray-500">首尾帧模式：参考图槽位 / 总图上限</label>
+                    <label className="text-xs text-gray-500">{currentRuntimeRule?.upstream?.adapter === "zex_video" ? "图片总数上限（首尾帧各 1 张）" : "首尾帧模式：参考图槽位 / 总图上限"}</label>
                     <div className="mt-1 flex gap-2">
-                      <input
+                      {currentRuntimeRule?.upstream?.adapter !== "zex_video" && <input
                         type="number"
                         min={0}
                         max={20}
@@ -5188,7 +5228,7 @@ export default function ModelsPage() {
                             }),
                           }))
                         }
-                      />
+                      />}
                       <input
                         type="number"
                         min={0}
@@ -5827,6 +5867,8 @@ export default function ModelsPage() {
               upstreamModel={form.new_api_model}
               endpoint={form.new_api_endpoint}
               requestMode={form.request_mode}
+              durationPriceTiers={Object.keys(currentPriceRule.unit_price_by_duration || {}).map(Number)}
+              resolutionPriceTiers={resolutionPriceTiers}
               modelBillingType={String((safeParseJson(form.price_rule, {}) as Record<string, unknown>).billing_type || "per_token")}
               onPrimaryBillingTypeChange={(billingType) => {
                 setForm((current) => ({

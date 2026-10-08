@@ -767,7 +767,7 @@ const dictionary: Record<string, string> = {
     "video.option.orientation.portrait": "세로",
     "video.option.orientation.landscape": "가로",
     "video.generationMode": "입력 조합",
-    "video.generationModeDesc": "공식 지원 텍스트·이미지·비디오·오디오·샘플 작업 조합을 선택합니다",
+    "video.generationModeDesc": "소재 조합을 선택하고 해당 소재를 업로드하세요. 사용 가능한 조합은 모델 설정에 따라 달라집니다.",
     "video.portraitAsset": "인물 에셋",
     "video.portraitImage": "인물 이미지",
     "video.portraitVideo": "인물 비디오",
@@ -986,5 +986,16 @@ Object.assign(dictionary, {
 });
 
 Object.assign(dictionary, canvas, workspace, account);
+
+Object.assign(dictionary, {
+  "video.materialBudget": "이미지·동영상·오디오: 총 {total}/{limit}개, {remaining}개 추가 가능",
+  "video.materialRemaining": "소재를 {remaining}개 더 추가할 수 있습니다. 이미지·동영상·오디오의 한도는 공통입니다.",
+  "video.materialLimit": "이미지·동영상·오디오는 합계 {limit}개까지 가능합니다.",
+  "workspace.estimatePerRun": "예상 {value} 크레딧 / 회",
+  "workspace.estimateAmount": "예상 {value} 크레딧",
+  "pricing.durationSeconds": "{seconds}초",
+  "pricing.imageCount": "{count}장",
+  "pricing.currencyCny": "{value} 위안"
+});
 
 export default dictionary;

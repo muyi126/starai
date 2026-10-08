@@ -1,4 +1,6 @@
 import * as canvasGraph from "./canvasGraph.ts";
+import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, configureZexUploadProfile } from "../../../../admin/src/lib/multimedia-templates.ts";
+import { buildVideoTaskParams, parseVideoRuntime } from "../../../../../packages/shared-types/src/videoModel.ts";
 import { documentPageTextInputs, documentPageParams } from "./documentImagePages.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -1146,6 +1148,48 @@ function productionCanvas(callbacks, overrides = {}) {
     ...overrides,
   });
 }
+
+test("gateway canvas submits ordered frames and combined references with actual templates", async () => {
+  for (const [name, mode, kinds, profile] of [
+    ["grok-imagine-video-1.5", "first_last", ["image", "image"]],
+    ["grok-imagine-video-1.5-lite", "first_frame", ["image"]],
+    ["seedance-2.0", "text", ["image", "video", "audio"]],
+    ["seedance-2.5-10s", "reference", ["image"]],
+    ["minimax-h3-max", "text", ["audio"]],
+    ["seedance-2.5-10s", "first_last", ["image", "image"], "seedance_2"],
+    ["seedance-2.0", "image_video_audio", ["image", "video", "audio"], "seedance_2"],
+  ]) {
+    const template = MULTIMEDIA_TEMPLATES.find(item => item.model === name);
+    const configured = profile ? configureZexUploadProfile(applyMultimediaTemplate({new_api_model:"",runtime_rule:"{}",new_api_extra_params:"{}"},template.key),profile) : null;
+    const model = { code: name, runtime_rule: configured ? JSON.parse(configured.runtime_rule) : template.runtime, input_schema: configured ? JSON.parse(configured.input_schema) : template.schema, default_params: configured ? JSON.parse(configured.default_params) : template.defaults };
+    const requests = [];
+    const ctx = environment(["update", "run"], {
+      videoModels: [model], modelsForKind: () => [model], parseVideoRuntime, buildVideoTaskParams,
+      parseAudioRuntime: () => ({}), normalizeCanvasParamsForModel: params => params, inferSeedanceMaterialMode: () => "reference",
+      api: async (_url, options) => { requests.push(JSON.parse(options.body)); return { status: "failed", task_no: "stop-after-request", error_message: "test complete" }; },
+    });
+    if(profile) vm.runInNewContext(ts.transpileModule(declarations.get("inferSeedanceMaterialMode").getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
+    ctx.nodesRef.current = [
+      ...kinds.map((kind, index) => node("source" + index, "generator", { outputKind: kind, outputUrl: `https://example.test/${index}.${kind === "image" ? "png" : kind === "video" ? "mp4" : "mp3"}` })),
+      node("target", "generator", { mediaKind: "video", modelCode: name, prompt: "generate video", params: { generation_mode: mode } }),
+    ];
+    ctx.edgesRef.current = kinds.map((_, index) => edge("source" + index, "target"));
+    await ctx.run("target");
+    assert.equal(requests.length, 1, `${name}: ${ctx.nodesRef.current.at(-1).data.error}`);
+    const params = requests[0].params;
+    assert.equal(params.duration, template.defaults.duration);
+    assert.equal(params.generation_mode, mode === "text" ? "reference" : mode);
+    if (mode === "first_last" || mode === "first_frame") {
+      assert.equal(params.first_frame, "https://example.test/0.png");
+      assert.equal(params.last_frame, mode === "first_last" ? "https://example.test/1.png" : undefined);
+      assert.equal(params.reference_images, undefined);
+    } else {
+      for (const kind of ["image", "video", "audio"]) {
+        assert.deepEqual(plain(params[`reference_${kind}s`] || []), kinds.flatMap((item, index) => item === kind ? [`https://example.test/${index}.${kind === "image" ? "png" : kind === "video" ? "mp4" : "mp3"}`] : []));
+      }
+    }
+  }
+});
 
 test("15-second production keeps all storyboard frames, switches channel strategy, and skips supplied copy", () => {
   const ctx = productionCanvas(["configureStory"]);

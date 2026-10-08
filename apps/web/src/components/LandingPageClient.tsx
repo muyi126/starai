@@ -4,7 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { type CSSProperties, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type Dispatch, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { ArrowRight, Bot, Boxes, Check, Clock3, Code2, Compass, Copy, Download, Headphones, ImageIcon, KeyRound, MessageCircle, Phone, Play, Sparkles, UserRound, Wand2, X } from "lucide-react";
 import { siAlibabacloud, siAnthropic, siDeepseek, siFlux, siGooglegemini, siHuggingface, siKuaishou, type SimpleIcon } from "simple-icons";
 import { SiteBrand, useSiteBranding } from "@/components/SiteBrand";
@@ -48,7 +48,18 @@ const MODEL_TICKER: TickerLogo[] = [
 ];
 
 const LANDING_GALLERY_LIMIT = 12;
-const LoginModal = dynamic(() => import("@/components/LoginModal").then((module) => module.LoginModal), { ssr: false });
+const loadLoginModal = () => import("@/components/LoginModal");
+
+function EntryLoading() {
+  const { t } = useI18n();
+  return <div role="status" aria-live="polite" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+    <div className="flex items-center gap-3 rounded-2xl bg-white px-6 py-5 text-sm text-gray-600 shadow-xl">
+      <span className="h-5 w-5 animate-spin rounded-full border-2 border-gray-200 border-t-primary" />{t("common.loading")}
+    </div>
+  </div>;
+}
+
+const LoginModal = dynamic(() => loadLoginModal().then((module) => module.LoginModal), { ssr: false, loading: EntryLoading });
 
 function InteractiveHeroCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -699,6 +710,7 @@ export default function LandingPageClient() {
   const { t } = useI18n();
   const { token, hydrate } = useAuthStore();
   const [showLogin, setShowLogin] = useState(false);
+  const [enteringApp, startEntryTransition] = useTransition();
   const [gallery, setGallery] = useState<ReferenceGalleryItem[]>([]);
   const [galleryLoading, setGalleryLoading] = useState(true);
   const gallerySectionRef = useRef<HTMLElement>(null);
@@ -711,9 +723,20 @@ export default function LandingPageClient() {
     hydrate();
   }, [hydrate]);
 
+  const prepareEntry = useCallback(() => {
+    if (token || hasUserSession()) router.prefetch("/app");
+    else void loadLoginModal().catch(() => { /* A click can retry a failed preload. */ });
+  }, [token, router]);
+
+  useEffect(() => {
+    // Warm the primary action after hydration, without delaying the homepage bundle.
+    const timer = window.setTimeout(prepareEntry, 200);
+    return () => window.clearTimeout(timer);
+  }, [prepareEntry]);
+
   const enterAppOrLogin = () => {
     if (token || hasUserSession()) {
-      router.push("/app");
+      startEntryTransition(() => router.push("/app"));
       return;
     }
     setShowLogin(true);
@@ -843,10 +866,10 @@ export default function LandingPageClient() {
                 {t("landing.apiDocs")}
               </Link>
             )}
-            <button onClick={enterAppOrLogin} className="h-9 max-w-[54px] truncate whitespace-nowrap rounded-full border border-white/20 px-2.5 text-xs leading-none text-white/86 transition hover:border-primary/60 sm:h-10 sm:max-w-none sm:px-5 sm:text-sm">
+            <button onClick={enterAppOrLogin} onPointerEnter={prepareEntry} onFocus={prepareEntry} className="h-9 max-w-[54px] truncate whitespace-nowrap rounded-full border border-white/20 px-2.5 text-xs leading-none text-white/86 transition hover:border-primary/60 sm:h-10 sm:max-w-none sm:px-5 sm:text-sm">
               {t("landing.login")}
             </button>
-            <button onClick={enterAppOrLogin} className="h-9 max-w-[78px] truncate whitespace-nowrap rounded-full bg-primary px-3 text-xs font-semibold leading-none text-dark transition hover:bg-primary/90 min-[390px]:max-w-[92px] sm:h-10 sm:max-w-none sm:px-5 sm:text-sm">
+            <button onClick={enterAppOrLogin} onPointerEnter={prepareEntry} onFocus={prepareEntry} className="h-9 max-w-[78px] truncate whitespace-nowrap rounded-full bg-primary px-3 text-xs font-semibold leading-none text-dark transition hover:bg-primary/90 min-[390px]:max-w-[92px] sm:h-10 sm:max-w-none sm:px-5 sm:text-sm">
               <span className="block truncate">{t("landing.start")}</span>
             </button>
             <UILanguageSelector compact tone="dark" />
@@ -865,7 +888,7 @@ export default function LandingPageClient() {
                 {t("landing.desc", { site: site_name || "StarAI" })}
               </p>
               <div className="mt-10 flex min-w-0 flex-col gap-3 sm:flex-row">
-                <button onClick={enterAppOrLogin} className="group box-border inline-flex w-full min-w-0 max-w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-primary px-5 py-3.5 text-sm font-semibold text-dark transition hover:bg-primary/90 sm:w-auto sm:px-7 sm:text-base">
+                <button onClick={enterAppOrLogin} onPointerEnter={prepareEntry} onFocus={prepareEntry} className="group box-border inline-flex w-full min-w-0 max-w-full items-center justify-center gap-2 overflow-hidden rounded-full bg-primary px-5 py-3.5 text-sm font-semibold text-dark transition hover:bg-primary/90 sm:w-auto sm:px-7 sm:text-base">
                   <span className="truncate">{t("landing.freeStart")}</span>
                   <ArrowRight size={18} className="transition group-hover:translate-x-0.5" />
                 </button>
@@ -1042,7 +1065,7 @@ export default function LandingPageClient() {
           <div className="absolute inset-x-0 top-0 h-px animate-[landingScan_5s_linear_infinite] bg-[linear-gradient(90deg,transparent,rgba(255,255,255,.8),transparent)]" />
           <h2 className="text-3xl font-bold sm:text-5xl">{t("landing.cta")}</h2>
           <p className="mx-auto mt-5 max-w-2xl text-sm leading-7 text-white/58">{t("landing.ctaDesc")}</p>
-          <button onClick={enterAppOrLogin} className="mt-8 inline-flex items-center gap-2 rounded-full bg-primary px-8 py-3.5 font-semibold text-dark transition hover:bg-primary/90">
+          <button onClick={enterAppOrLogin} onPointerEnter={prepareEntry} onFocus={prepareEntry} className="mt-8 inline-flex items-center gap-2 rounded-full bg-primary px-8 py-3.5 font-semibold text-dark transition hover:bg-primary/90">
             {t("landing.tryNow")}
             <ArrowRight size={18} />
           </button>
@@ -1066,6 +1089,7 @@ export default function LandingPageClient() {
         <CustomerService config={branding} />
       )}
       {showLogin && <LoginModal open onClose={() => setShowLogin(false)} />}
+      {enteringApp && <EntryLoading />}
     </div>
   );
 }

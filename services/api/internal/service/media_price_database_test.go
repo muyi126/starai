@@ -54,7 +54,29 @@ func TestMediaModelLoadNormalizesLegacyPriceBeforeSnapshot(t *testing.T) {
 	if err != nil || next.PriceRule["unit_price"] != float64(2) || snapshot["unit_price"] != 1.25 {
 		t.Fatalf("snapshot changed with subsequent pricing: old=%#v, err=%v", snapshot, err)
 	}
-	for _, invalid := range []string{`{"billing_type":"per_second","unit_price":"NaN"}`, `{"billing_type":"per_image","unit_price":-1}`, `{"billing_type":"unsupported","unit_price":1}`} {
+	if _, err := pool.Exec(ctx, `UPDATE models SET price_rule='{"billing_type":"per_request","unit_price":1,"unit_price_by_resolution":{"480p":"5.5","720p":"8.75"}}'`); err != nil {
+		t.Fatal(err)
+	}
+	tiered, err := models.GetFullByCode(ctx, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for resolution, price := range map[string]float64{"480p": 5.5, "720p": 8.75} {
+		if got := models.EstimateCost(tiered, map[string]interface{}{"duration": 10, "resolution": resolution}, 0, 0); got != price {
+			t.Fatalf("stored resolution quote=%v want=%v", got, price)
+		}
+	}
+	snapshot = copyMap(tiered.PriceRule)
+	if _, err := pool.Exec(ctx, `UPDATE models SET price_rule='{"billing_type":"per_request","unit_price":1,"unit_price_by_resolution":{"480p":99,"720p":199}}'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := models.GetFullByCode(ctx, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["unit_price_by_resolution"].(map[string]interface{})["720p"] != 8.75 {
+		t.Fatal("stored resolution snapshot changed with new prices")
+	}
+	for _, invalid := range []string{`{"billing_type":"per_second","unit_price":"NaN"}`, `{"billing_type":"per_image","unit_price":-1}`, `{"billing_type":"unsupported","unit_price":1}`, `{"billing_type":"per_request","unit_price":1,"unit_price_by_resolution":{"480p":-1}}`} {
 		if _, err := pool.Exec(ctx, `UPDATE models SET price_rule=$1::jsonb`, invalid); err != nil {
 			t.Fatal(err)
 		}

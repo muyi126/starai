@@ -1,3 +1,4 @@
+import videoPricing from "./supplements/vi-VN/videoPricing.ts";
 import virtualTryOn from "./supplements/vi-VN/virtualTryOn.ts";
 import agentCanvas from "./supplements/vi-VN/agentCanvas.ts";
 import productRefine from "./supplements/vi-VN/productRefine.ts";
@@ -8,6 +9,8 @@ import agentWorkspace from "./supplements/vi-VN/agentWorkspace.ts";
 import commerceVideo from "./supplements/vi-VN/commerceVideo.ts";
 
 const sourceTranslations: Record<string, string> = {
+  "AI 大模型聚合平台": "Nền tảng tích hợp mô hình AI",
+  "一个入口完成对话理解、图片、视频、语音和音乐创作。": "Tạo hội thoại, ảnh, video, giọng nói và âm nhạc trong cùng một không gian làm việc.",
   "API 文档中心": "Tài liệu API",
   "聊天与文本": "Trò chuyện & văn bản",
   "平台": "Nền tảng",
@@ -535,5 +538,7 @@ Object.assign(sourceTranslations, photoStudio);
 Object.assign(sourceTranslations, virtualTryOnExtra);
 Object.assign(sourceTranslations, agentWorkspace);
 Object.assign(sourceTranslations, commerceVideo);
+
+Object.assign(sourceTranslations, videoPricing);
 
 export default sourceTranslations;

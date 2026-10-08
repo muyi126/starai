@@ -11,7 +11,7 @@ import { filterReferenceCases, loadReferenceGalleryManifest, referenceImageURL, 
 
 const SystemAssetLibraryDialog = dynamic(() => import("./SystemAssetLibraryDialog").then(module => module.SystemAssetLibraryDialog));
 
-export type ReferenceImagePick = { url: string; name: string; public_id?: string };
+export type ReferenceImagePick = { url: string; name: string; public_id?: string; duration_seconds?: number };
 
 interface GalleryPickItem {
   public_id: string;
@@ -444,6 +444,7 @@ export function ChatTopTools({
   showUpload = true,
   showRole = true,
   referencePickMode = false,
+  referenceAssetKind = "image",
   referenceImages = [],
   onReferenceImagesChange,
   maxReferenceImages = 4,
@@ -457,6 +458,7 @@ export function ChatTopTools({
   showUpload?: boolean;
   showRole?: boolean;
   referencePickMode?: boolean;
+  referenceAssetKind?: "image" | "video" | "audio";
   referenceImages?: ReferenceImagePick[];
   onReferenceImagesChange?: (next: ReferenceImagePick[]) => void;
   maxReferenceImages?: number;
@@ -697,10 +699,14 @@ export function ChatTopTools({
 
   const toggleRefPick = (item: ReferenceImagePick, locked?: boolean) => {
     if (locked) return;
-    const limit = Math.max(1, Number(maxReferenceImages || 1));
+    const limit = Math.max(0, Number(maxReferenceImages));
     const exists = pickedRefs.some((x) => x.url === item.url);
     if (exists) {
       setPickedRefs(pickedRefs.filter((x) => x.url !== item.url));
+      return;
+    }
+    if (limit === 0) {
+      setAssetNotice({ type: "error", message: t("asset.maxReferenceImages", { max: limit }) });
       return;
     }
     if (limit <= 1) {
@@ -1226,15 +1232,19 @@ export function ChatTopTools({
 
       {assetOpen && <SystemAssetLibraryDialog
         open={assetOpen}
-        kind={referencePickMode ? "image" : "all"}
+        kind={referencePickMode ? referenceAssetKind : "all"}
         title={referencePickMode ? assetLibraryLabel || t("asset.selectReferenceFromLibrary") : t("asset.selectFromLibrary")}
         description={referencePickMode ? td("asset.referenceLibraryHint", "默认打开我的资产；需要案例时可进入灵感广场。") : td("asset.libraryHint", "选择当前账号可访问的素材")}
         selected={(referencePickMode ? referenceImages : selectedAssets) as SystemAssetPick[]}
         maxSelected={referencePickMode ? maxReferenceImages : 20}
-        allowInspiration={referencePickMode && !referenceAssetsOnly}
+        allowInspiration={referencePickMode && referenceAssetKind === "image" && !referenceAssetsOnly}
         onClose={() => setAssetOpen(false)}
         onConfirm={(items) => {
-          if (referencePickMode) onReferenceImagesChange?.(items.map((item) => ({ url: item.url, name: item.name, public_id: item.public_id })));
+          if (referencePickMode) onReferenceImagesChange?.(items.map((item) => ({
+            url: item.url, name: item.name, public_id: item.public_id,
+            ...(referenceAssetKind !== "image" && Number(item.metadata?.duration_seconds ?? item.metadata?.duration) > 0
+              ? { duration_seconds: Number(item.metadata?.duration_seconds ?? item.metadata?.duration) } : {}),
+          })));
           else set({ asset_ids: items.map((item) => item.public_id).filter((id): id is string => !!id) });
           setAssetOpen(false);
         }}

@@ -27,6 +27,8 @@ import type { Model } from "@starai/shared-types";
 import {
   buildAudioTaskParams,
   buildVideoTaskParams,
+  selectVideoTaskMedia,
+  videoReferenceCapacity,
   EMPTY_VIDEO_MEDIA,
   canonicalVideoSize,
   isSizeBasedVideoProfile,
@@ -799,7 +801,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const [taskProgress, setTaskProgress] = useState(0);
   const [params, setParams] = useState<Record<string, unknown>>(() => ({
     ...(model.category === "video" || model.category === "audio"
-      ? { ...(model.default_params || {}), ...schemaDefaultsFromFields(model.input_schema) }
+      ? { ...schemaDefaultsFromFields(model.input_schema), ...(model.default_params || {}) }
       : { ...schemaDefaults(model.input_schema), ...(model.default_params || {}) }),
   }));
   const [refImages, setRefImages] = useState<RefImage[]>([]);
@@ -933,6 +935,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const audioConfig = parseAudioRuntime(model.runtime_rule);
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
   const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
+  const isGatewayVideo = isVideo && (videoConfig.upload_profile === "gateway_reference" || (model.runtime_rule as any)?.upstream?.adapter === "zex_video");
+  const isGrokVideo = isGatewayVideo && ["zex_grok_imagine_video_1_5", "zex_grok_imagine_video_1_5_fast"].includes(String(model.runtime_rule?.template_key || ""));
+  const isZexMiniMax = isGatewayVideo && (/^zex_minimax_h3/.test(String(model.runtime_rule?.template_key || "")) || /^minimax-h3(?:-max)?$/.test(String(model.code)));
+  const stackVideoInput = isSeedance2 || isZexMiniMax || (isGatewayVideo && String(model.runtime_rule?.template_key || "").startsWith("zex_seedance_2_0"));
   const isAliyunMultimodal = isVideo && videoConfig.upload_profile === "aliyun_multimodal";
   const isAliyunHappyHorse = isVideo && String(videoConfig.upload_profile || "").startsWith("aliyun_happyhorse_");
   const isVeoReference = isVideo && videoConfig.upload_profile === "veo_reference";
@@ -948,7 +954,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       videoAdapter === "veo_frame_pair_v1" ||
       isLegacyVeoFlFramePair);
   const isFramePairUpload =
-    isVideo && (videoConfig.upload_profile === "frame_pair" || videoConfig.upload_profile === "first_frame" || isVeoFramePair);
+    isVideo && !isGatewayVideo && (videoConfig.upload_profile === "frame_pair" || videoConfig.upload_profile === "first_frame" || isVeoFramePair);
   const videoUploadConfig = isVeoFramePair
     ? {
         ...videoConfig,
@@ -957,15 +963,18 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         max_reference_images: 0,
         reference_images: { ...(videoConfig.reference_images || {}), max: 0 },
       }
-    : videoConfig;
+    : isGatewayVideo && ["frame_pair", "first_frame"].includes(String(videoConfig.upload_profile))
+      ? { ...videoConfig, upload_profile: "aliyun_multimodal" as const }
+      : videoConfig;
   const isOmniReference = isVideo && videoConfig.upload_profile === "omni_reference";
-  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isAliyunMultimodal || isAliyunHappyHorse || isVeoReference || isOmniReference;
+  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal || isAliyunHappyHorse || isVeoReference || isOmniReference;
   const fixedHappyHorseMode = videoConfig.upload_profile === "aliyun_happyhorse_first_frame"
     ? "first_frame"
     : videoConfig.upload_profile === "aliyun_happyhorse_reference" || videoConfig.upload_profile === "aliyun_happyhorse_edit"
       ? "reference"
       : "text";
   const videoMaterialMode = String(isAliyunHappyHorse ? fixedHappyHorseMode : params[videoConfig.mode_param || "generation_mode"] || "text");
+  const videoReferenceBudget = videoReferenceCapacity(videoConfig, videoMedia, videoMaterialMode);
   const veoFirstFrameAssets = useMemo(
     () => (videoMedia.first_frame ? [videoMedia.first_frame] : []),
     [videoMedia.first_frame]
@@ -975,8 +984,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     [videoMedia.last_frame]
   );
   const videoTaskMedia = useMemo(
-    () => (isVeoFramePair ? { ...videoMedia, reference_images: [] } : videoMedia),
-    [isVeoFramePair, videoMedia]
+    () => selectVideoTaskMedia(params, isVeoFramePair ? { ...videoMedia, reference_images: [] } : videoMedia, model.runtime_rule),
+    [params, model.runtime_rule, isVeoFramePair, videoMedia]
   );
   const videoRequestParams = useMemo(
     () => normalizeSizeBasedVideoParams(params, model.runtime_rule),
@@ -993,24 +1002,29 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     : isAudio
     ? (audioConfig.prompt_hint ? ts(audioConfig.prompt_hint) : t("workspace.placeholder.audio"))
     : t("workspace.placeholder.image");
+  const mediaPricingLabel = model.price_rule?.billing_type === "per_token" ? t("workspace.tokenBilling")
+    : model.price_rule?.billing_type === "per_second" ? ts("按秒计费")
+    : model.price_rule?.billing_type === "per_image" ? ts("按张计费")
+    : model.price_rule?.billing_type === "dynamic" ? ts("动态计费")
+    : ts("按次计费");
   const referenceAssetIds = useMemo(
     () =>
       [
         ...refImages.map((x) => x.public_id),
-        videoMedia.first_frame?.public_id,
-        videoMedia.last_frame?.public_id,
-        ...(!isVeoFramePair ? videoMedia.reference_images.map((x) => x.public_id) : []),
-        ...videoMedia.reference_videos.map((x) => x.public_id),
-        ...videoMedia.reference_audios.map((x) => x.public_id),
+        videoTaskMedia.first_frame?.public_id,
+        videoTaskMedia.last_frame?.public_id,
+        ...(!isVeoFramePair ? videoTaskMedia.reference_images.map((x) => x.public_id) : []),
+        ...videoTaskMedia.reference_videos.map((x) => x.public_id),
+        ...videoTaskMedia.reference_audios.map((x) => x.public_id),
       ].filter((x): x is string => !!x),
     [
       refImages,
       isVeoFramePair,
-      videoMedia.first_frame,
-      videoMedia.last_frame,
-      videoMedia.reference_images,
-      videoMedia.reference_videos,
-      videoMedia.reference_audios,
+      videoTaskMedia.first_frame,
+      videoTaskMedia.last_frame,
+      videoTaskMedia.reference_images,
+      videoTaskMedia.reference_videos,
+      videoTaskMedia.reference_audios,
     ]
   );
 
@@ -1037,7 +1051,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     const defaults = model.default_params || {};
     setParams({
       ...(isVideo || isAudio
-        ? { ...defaults, ...schemaDefaultsFromFields(workbenchInputSchema) }
+        ? { ...schemaDefaultsFromFields(workbenchInputSchema), ...defaults }
         : { ...schemaDefaults(workbenchInputSchema), ...defaults }),
       ...(isAudio ? { count: undefined, n: undefined } : {}),
     });
@@ -1059,7 +1073,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     setPrompt(initialPrompt || "");
   }, [initializationKey, model.code, initialPrompt, isVideo, isAudio, isImage, workbenchInputSchema, model.default_params, model.runtime_rule, capDeepThink, reasoningConfig.default_enabled, imageAllowsAutoRatio, imageCountMax]);
 
-  useEffect(() => {
+  const estimateBody = useMemo(() => {
     const selectedAssets = bottom.asset_ids?.length ? { asset_ids: bottom.asset_ids } : {};
     const selectedReferenceAssets = referenceAssetIds.length ? { reference_asset_ids: referenceAssetIds } : {};
     const languageParams = buildLanguageParams(selectedLanguage);
@@ -1094,19 +1108,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
               : {}),
             ...selectedAssets,
           };
-    setEstimateError("");
-    api<{ estimated_cost: number }>(`/api/models/${model.code}/estimate`, {
-      method: "POST",
-      body: JSON.stringify({ params: bodyParams }),
-    })
-      .then((r) => {
-        setEstimatedCost(r.estimated_cost);
-        setEstimateError("");
-      })
-      .catch((err) => {
-        setEstimatedCost(null);
-        if (isMultiCollab) setEstimateError(err instanceof Error ? err.message : t("workspace.modelPriceMissing"));
-      });
+    return JSON.stringify({ params: bodyParams });
   }, [
     model.code,
     params,
@@ -1133,8 +1135,29 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     activeSummaryCode,
     customSelectionEnabled,
     referenceAssetIds,
-    t,
   ]);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    setEstimatedCost(null);
+    setEstimateError("");
+    // Coalesce rapid edits and prevent an old quote from replacing the selected tier.
+    const timer = window.setTimeout(() => {
+      api<{ estimated_cost: number }>(`/api/models/${model.code}/estimate`, {
+        method: "POST", body: estimateBody, signal: controller.signal,
+      }).then((r) => {
+        if (!active) return;
+        setEstimatedCost(r.estimated_cost);
+        setEstimateError("");
+      }).catch((err) => {
+        if (!active || err?.name === "AbortError") return;
+        setEstimatedCost(null);
+        if (isMultiCollab) setEstimateError(err instanceof Error ? err.message : t("workspace.modelPriceMissing"));
+      });
+    }, 180);
+    return () => { active = false; window.clearTimeout(timer); controller.abort(); };
+  }, [model.code, model.price_rule, estimateBody, isMultiCollab, t]);
 
   useEffect(() => {
     if (!isChat) return;
@@ -1729,7 +1752,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       alert(t("canvas.node.referenceVisualRequired"));
       return;
     }
-    if (isMiniMaxH3 || isAliyunMultimodal || isAliyunHappyHorse) {
+    if (isMiniMaxH3 || isGatewayVideo || isAliyunMultimodal || isAliyunHappyHorse) {
       if (videoMaterialMode === "first_frame" && !videoMedia.first_frame?.url) {
         alert(t("canvas.node.firstFrameRequired"));
         return;
@@ -1751,6 +1774,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         alert(t("canvas.node.referenceVisualRequired"));
         return;
       }
+    }
+    if (isVideo && videoReferenceBudget.limit !== undefined && videoReferenceBudget.total > videoReferenceBudget.limit) {
+      alert(t("video.materialLimit", { limit: videoReferenceBudget.limit }));
+      return;
     }
     if (videoConfig.upload_profile === "aliyun_happyhorse_edit" && videoMedia.reference_videos.length !== 1) {
       alert(ts("视频编辑需要上传一个待编辑视频"));
@@ -2414,7 +2441,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                       </div>
                       <InputToolbarMeta
                         onPricing={() => setPricingOpen(true)}
-                        costHint={estimatedCost != null ? `Est. ${estimatedCost.toFixed(2)}/run` : null}
+                        pricingLabel={mediaPricingLabel}
+                        costHint={estimatedCost != null ? t("workspace.estimatePerRun", { value: estimatedCost.toFixed(2) }) : null}
                       />
                     </div>
                   </div>
@@ -2465,8 +2493,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                               />
                             ) : null}
                           </>
-                        ) : (isAliyunMultimodal || isAliyunHappyHorse) ? (
+                        ) : (isGatewayVideo || isAliyunMultimodal || isAliyunHappyHorse) ? (
                           <>
+                            {isGatewayVideo && videoMaterialMode === "text" && (
+                              <ChatTopTools value={bottom} onChange={setBottom} showUpload={false} showRole={false} />
+                            )}
                             {(videoMaterialMode === "first_frame" || videoMaterialMode === "first_last") && (
                               <ChatTopTools
                                 value={bottom}
@@ -2493,7 +2524,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                                 assetLibraryLabel={`${t("video.lastFrame")} · ${t("asset.library")}`}
                               />
                             )}
-                            {videoMaterialMode === "reference" && (
+                            {(videoMaterialMode === "reference" || videoMaterialMode.split("_").includes("image")) && (
                               <ChatTopTools
                                 value={bottom}
                                 onChange={setBottom}
@@ -2501,10 +2532,31 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                                 showRole={false}
                                 referencePickMode
                                 referenceImages={videoMedia.reference_images}
-                                onReferenceImagesChange={(images) => setVideoMedia((prev) => ({ ...prev, reference_images: images }))}
-                                maxReferenceImages={videoConfig.reference_images?.max ?? maxVideoAssetRefs}
+                                onReferenceImagesChange={(images) => setVideoMedia((prev) => ({ ...prev, reference_images: images.slice(0, videoReferenceCapacity(videoConfig, prev, videoMaterialMode).reference_images) }))}
+                                maxReferenceImages={videoReferenceBudget.reference_images}
                                 assetLibraryLabel={`${t("video.referenceImage")} · ${t("asset.library")}`}
                               />
+                            )}
+                            {isGatewayVideo && (["video", "audio"] as const).map((kind) => {
+                              const slot = kind === "video" ? "reference_videos" : "reference_audios";
+                              const max = videoReferenceBudget[slot];
+                              if ((videoConfig[slot]?.max ?? 0) <= 0 || !(videoMaterialMode === "reference" || videoMaterialMode.split("_").includes(kind))) return null;
+                              return <ChatTopTools
+                                key={kind}
+                                value={bottom}
+                                onChange={setBottom}
+                                showUpload={false}
+                                showRole={false}
+                                referencePickMode
+                                referenceAssetKind={kind}
+                                referenceImages={videoMedia[slot]}
+                                onReferenceImagesChange={(items) => setVideoMedia((prev) => ({ ...prev, [slot]: items.slice(0, videoReferenceCapacity(videoConfig, prev, videoMaterialMode)[slot]) }))}
+                                maxReferenceImages={max}
+                                assetLibraryLabel={`${t(kind === "video" ? "video.referenceVideo" : "video.referenceAudio")} · ${t("asset.library")}`}
+                              />;
+                            })}
+                            {isGatewayVideo && (
+                              <ChatTopTools value={bottom} onChange={setBottom} showUpload={false} showAssets={false} />
                             )}
                           </>
                         ) : (
@@ -2529,7 +2581,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                       </div>
                       <InputToolbarMeta
                         onPricing={() => setPricingOpen(true)}
-                        costHint={estimatedCost != null ? `Est. ${estimatedCost.toFixed(2)}/run` : null}
+                        pricingLabel={mediaPricingLabel}
+                        costHint={estimatedCost != null ? t("workspace.estimatePerRun", { value: estimatedCost.toFixed(2) }) : null}
                       />
                     </div>
                   </div>
@@ -2545,12 +2598,12 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                     </div>
                     <InputToolbarMeta
                       onPricing={() => setPricingOpen(true)}
-                      pricingLabel={model.price_rule?.billing_type === "per_token" ? t("workspace.tokenBilling") : model.price_rule?.billing_type === "per_second" ? ts("按秒计费") : model.price_rule?.billing_type === "dynamic" ? ts("动态计费") : ts("按次计费")}
+                      pricingLabel={mediaPricingLabel}
                       costHint={
                         model.price_rule?.billing_type === "per_token" || audioConfig.billing_hint !== "estimated"
                           ? undefined
                           : estimatedCost != null
-                            ? `Est. ${estimatedCost.toFixed(2)}/run`
+                            ? t("workspace.estimatePerRun", { value: estimatedCost.toFixed(2) })
                             : null
                       }
                     />
@@ -2596,43 +2649,46 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 />
               </div>
             ) : isEnhancedVideoMaterial && videoMaterialMode !== "text" ? (
-              <div className="flex flex-col md:flex-row md:items-stretch">
-                <div className="w-full min-w-0 px-3 py-3 sm:px-4 md:w-auto md:max-w-[62%] md:flex-none md:pr-1">
+              <div className={clsx("flex flex-col", !stackVideoInput && "md:flex-row md:items-stretch")}>
+                <div className={clsx("w-full min-w-0 px-3 pt-3 sm:px-4", !stackVideoInput && "pb-3 md:w-auto md:max-w-[62%] md:flex-none md:pr-1")}>
                   <VideoUploadArea
                     config={videoUploadConfig}
                     media={videoMedia}
                     onChange={setVideoMedia}
                     mode={videoMaterialMode}
+                    showBudgetNotice={!isGrokVideo && !isZexMiniMax}
                     portraitAssetId={String(params.portrait_asset_id || "")}
                     portraitAssetType={params.portrait_asset_type === "video" ? "video" : "image"}
-                    onPortraitAssetIdChange={(value) => setParams({ ...params, portrait_asset_id: value })}
-                    onPortraitAssetTypeChange={(value) => setParams({ ...params, portrait_asset_type: value })}
+                    onPortraitAssetIdChange={isGatewayVideo ? undefined : (value) => setParams({ ...params, portrait_asset_id: value })}
+                    onPortraitAssetTypeChange={isGatewayVideo ? undefined : (value) => setParams({ ...params, portrait_asset_type: value })}
                   />
                 </div>
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  placeholder={promptPlaceholder}
-                  rows={5}
-                  className="min-h-28 min-w-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm placeholder:text-gray-400 focus:outline-none"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
-                      e.preventDefault();
-                      submit();
-                    }
-                  }}
-                />
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder={promptPlaceholder}
+                    rows={5}
+                    className="min-h-28 w-full min-w-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm placeholder:text-gray-400 focus:outline-none"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                        e.preventDefault();
+                        submit();
+                      }
+                    }}
+                  />
+                </div>
               </div>
             ) : isVideo ? (
               <div className="flex flex-col">
                 <div className="px-3 pt-3 sm:px-4">
-                  <VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} />
+                  <VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={isEnhancedVideoMaterial ? videoMaterialMode : undefined} />
                 </div>
                 <textarea
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   placeholder={promptPlaceholder}
-                  rows={4}
+                  rows={stackVideoInput ? 5 : 4}
                   className="w-full resize-none bg-transparent px-4 py-3 text-sm placeholder:text-gray-400 focus:outline-none"
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); submit(); }
@@ -2837,14 +2893,14 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 )}
                 {estimatedCost !== null && !isVideo && !isImage && !isAudio && !isMultiCollab && (
                   <span className="text-xs text-primary ml-1">
-                    Est. {estimatedCost.toFixed(4)}
+                    {t("workspace.estimateAmount", { value: estimatedCost.toFixed(4) })}
                   </span>
                 )}
               </div>
               <div className={isMultiCollab ? "flex items-center justify-between gap-2 w-full sm:w-auto shrink-0" : "shrink-0"}>
                 {estimatedCost !== null && isMultiCollab && (
                   <span className="text-xs text-primary whitespace-nowrap">
-                    Est. {estimatedCost.toFixed(4)}
+                    {t("workspace.estimateAmount", { value: estimatedCost.toFixed(4) })}
                   </span>
                 )}
                 {estimatedCost === null && estimateError && isMultiCollab && (

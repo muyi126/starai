@@ -550,6 +550,11 @@ export function AgentWorkspace({ code }: { code: string }) {
   const usesCompactCommerceInput = code === "ecommerce_image" || code === "ecommerce_video";
   const usesInlineReferenceInput = usesCompactCommerceInput || code === "general_image";
   const videoConfig = parseVideoRuntime(generationModel?.runtime_rule);
+  const videoUploadConfig = (generationModel?.runtime_rule?.upstream as { adapter?: string })?.adapter === "zex_video" && ["frame_pair", "first_frame"].includes(String(videoConfig.upload_profile))
+    ? { ...videoConfig, upload_profile: "aliyun_multimodal" as const } : videoConfig;
+  const videoMaterialMode = (generationModel?.runtime_rule?.upstream as { adapter?: string })?.adapter === "zex_video"
+    || ["seedance_2", "minimax_h3", "aliyun_multimodal", "gateway_reference", "veo_reference", "omni_reference"].includes(String(videoConfig.upload_profile)) || String(videoConfig.upload_profile).startsWith("aliyun_happyhorse_")
+    ? String(params[videoConfig.mode_param || "generation_mode"] || "text") : undefined;
   const generationImageRuntime = (generationModel?.runtime_rule?.image || {}) as Record<string, unknown>;
   const configuredImageTiers = Array.isArray(generationImageRuntime.supported_size_tiers) ? generationImageRuntime.supported_size_tiers : generationImageRuntime.supported_sizes;
   const generationImageTiers = Array.isArray(configuredImageTiers)
@@ -2103,7 +2108,7 @@ export function AgentWorkspace({ code }: { code: string }) {
             </div>
             {!usesInlineReferenceInput && supportReferenceImage && <div className="px-3 pt-3 sm:px-4">
               {isVideoGeneration && generationModel ? (
-                <VideoUploadArea config={videoConfig} media={videoMedia} onChange={setVideoMedia} />
+                <VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} />
               ) : (
                 <div className="scroll-x-only flex flex-nowrap items-center gap-2 h-16 min-w-0">
                   {productImage ? (
@@ -2136,7 +2141,7 @@ export function AgentWorkspace({ code }: { code: string }) {
               {code === "general_image" && supportReferenceImage && <div className="flex shrink-0 items-center py-3 pl-3 pr-1">
                 {productImage ? <div className="group/img relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-gray-100 shadow-sm dark:border-white/10 dark:bg-white/5"><Image src={productImage.url} alt={productImage.name} width={128} height={128} sizes="64px" className="h-full w-full object-cover" /><button type="button" aria-label={t("common.remove")} onClick={() => setProductImage(null)} className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-90 transition sm:opacity-0 sm:group-hover/img:opacity-100"><X size={11}/></button></div> : <label title={t("asset.uploadImage")} className="flex h-16 w-20 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-gray-200 bg-gray-50 text-gray-500 shadow-sm transition hover:border-primary/50 hover:bg-primary/5 dark:border-white/15 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-primary/10">{uploading ? <Loader2 size={18} className="animate-spin text-primary"/> : <Plus size={18}/>}<span className="px-1 text-center text-[10px] leading-none">{t("asset.uploadImage")}</span><input aria-label={t("asset.uploadImage")} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" disabled={uploading} onChange={e => {handleUpload(e.target.files?.[0]);e.target.value="";}}/></label>}
               </div>}
-              {code === "ecommerce_video" && supportReferenceImage && isVideoGeneration && generationModel && <div className="scroll-x-only max-h-[88px] max-w-[52%] shrink-0 overflow-auto py-3 pl-3 pr-1"><VideoUploadArea config={videoConfig} media={videoMedia} onChange={setVideoMedia} /></div>}
+              {code === "ecommerce_video" && supportReferenceImage && isVideoGeneration && generationModel && <div className="scroll-x-only max-h-[88px] max-w-[52%] shrink-0 overflow-auto py-3 pl-3 pr-1"><VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} /></div>}
               <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={code === "ecommerce_image" ? ts("一句话描述想要的效果，或只上传图片让 AI 自由发挥；需要保留的内容直接写出来。") : code === "ecommerce_video" ? ts("一句话描述想做的带货视频，也可以只上传素材让 AI 自动完成脚本与成片。") : code === "general_image" ? ts("描述想生成的画面；左侧可上传参考图，并补充主体、构图、风格和光线要求。") : workflow ? td(`agent.${workflow.code}.input.placeholder`, display.input?.placeholder || t("agent.inputPlaceholder")) : (display.input?.placeholder || t("agent.inputPlaceholder"))} rows={3} className="min-h-[88px] min-w-0 flex-1 resize-none bg-transparent px-4 pb-10 pt-3 pr-14 text-sm text-gray-700 focus:outline-none placeholder:text-gray-400 leading-relaxed dark:text-gray-100 dark:placeholder:text-gray-500" />
               {usesCompactCommerceInput && <button type="button" onClick={() => void enhanceCommercePrompt()} disabled={!prompt.trim() || promptEnhancing} aria-label={ts("增强提示词")} title={ts("增强当前场景的提示词")} className="absolute bottom-2 right-3 flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 shadow-sm transition hover:border-primary/50 hover:bg-primary/10 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/15 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-primary/15 dark:hover:text-white">
                 {promptEnhancing ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}

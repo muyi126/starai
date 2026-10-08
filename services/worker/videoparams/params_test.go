@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestZexSeedance25DefaultResolution(t *testing.T) {
+	rule := map[string]interface{}{"upstream": map[string]interface{}{"adapter": "zex_video", "model_template": "seedance-2.5-{duration}s", "include": []interface{}{"duration", "aspect_ratio", "resolution"}}}
+	for _, seconds := range []int{10, 15, 30} {
+		for _, resolution := range []string{"auto", "480p", "720p"} {
+			params := map[string]interface{}{"prompt": "audit", "duration": seconds, "resolution": resolution, "first_frame": "https://e.test/first.png", "last_frame": "https://e.test/last.png"}
+			out := BuildUpstreamVideoPayload("seedance25", "seedance-2.5-10s", rule, nil, params)
+			if out["model"] != "seedance-2.5-"+strconv.Itoa(seconds)+"s" || out["seconds"] != strconv.Itoa(seconds) || out["first_last_frame"] != true {
+				t.Fatalf("fixed alias or frames changed: %#v", out)
+			}
+			if resolution == "auto" {
+				if _, sent := out["resolution"]; sent {
+					t.Fatalf("server default must omit resolution: %#v", out)
+				}
+			} else if out["resolution"] != resolution {
+				t.Fatalf("administrator-expanded explicit resolution lost: %#v", out)
+			}
+		}
+	}
+}
+
 func TestWaveSpeedLipSyncPayload(t *testing.T) {
 	input := []interface{}{map[string]interface{}{"type": "video", "url": "https://example.com/v.mp4"}, map[string]interface{}{"type": "audio", "url": "https://example.com/a.wav"}}
 	got := BuildUpstreamVideoPayload("video_sync_lipsync", "wavespeed-ai/latentsync", map[string]interface{}{"upstream": map[string]interface{}{"adapter": "wavespeed_lipsync"}}, nil, map[string]interface{}{"input": input, "duration": 8, "prompt": "do not send"})

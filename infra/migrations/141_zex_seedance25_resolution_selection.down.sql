@@ -1,0 +1,1 @@
+-- No-op: keep user-selectable resolutions and administrator configuration.

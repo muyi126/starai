@@ -38,3 +38,28 @@ test('landing gallery waits until approached, fetches once and ignores unmounted
     assert.equal(updates, 0, 'late results do not update an unmounted page');
   }
 });
+
+test('landing entry warms login or authenticated workbench and responds before navigation completes', async () => {
+  const file = ts.createSourceFile('LandingPageClient.tsx', readFileSync(new URL('./LandingPageClient.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const statements = {};
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && ['prepareEntry', 'enterAppOrLogin'].includes(node.name.getText(file))) statements[node.name.getText(file)] = node.getText(file);
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  for (const [token, session] of [[null, false], ['session', false], [null, true]]) {
+    const events = [];
+    const context = {
+      token, hasUserSession: () => session, useCallback: fn => fn,
+      router: { prefetch: path => events.push(`prefetch:${path}`), push: path => events.push(`push:${path}`) },
+      loadLoginModal: () => { events.push('preload:login'); return Promise.reject(new Error('temporary chunk failure')); },
+      setShowLogin: open => events.push(`login:${open}`), startEntryTransition: fn => { events.push('pending'); fn(); },
+    };
+    const js = ts.transpileModule(`const ${statements.prepareEntry}; const ${statements.enterAppOrLogin}; globalThis.prepare = prepareEntry; globalThis.enter = enterAppOrLogin;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    vm.runInNewContext(js, context);
+    context.prepare();
+    await new Promise(resolve => setImmediate(resolve));
+    context.enter();
+    assert.deepEqual(events, token || session ? ['prefetch:/app', 'pending', 'push:/app'] : ['preload:login', 'login:true']);
+  }
+});

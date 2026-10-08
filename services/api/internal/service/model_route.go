@@ -165,6 +165,12 @@ func defaultModelRouteTimeout(requestMode string) int {
 }
 
 func validateRouteCostRule(rule map[string]interface{}) error {
+	if err := normalizeResolutionTierPrices(rule, "unit_cost_by_resolution"); err != nil {
+		return err
+	}
+	if err := normalizeDurationTierPrices(rule, "unit_cost_by_duration"); err != nil {
+		return err
+	}
 	if len(rule) == 0 {
 		return nil
 	}
@@ -829,7 +835,7 @@ func EstimateRouteProviderCostWithTokenDetails(route *ModelRoute, params map[str
 		if actual, exists := actualBillingCount(params, "_actual_request_count"); exists {
 			count = actual
 		}
-		return count * floatValue(rule["unit_cost"])
+		return count * durationTierPrice(rule, params, "unit_cost_by_duration", "unit_cost")
 	case "per_image":
 		unitCost := imageTierPrice(rule, params, "unit_cost_by_size", "unit_cost")
 		if actual, exists := actualBillingCount(params, "_actual_output_image_count"); exists {
@@ -844,11 +850,12 @@ func EstimateRouteProviderCostWithTokenDetails(route *ModelRoute, params map[str
 		}
 		return float64(count) * unitCost
 	case "per_second":
+		unitCost := resolutionTierPrice(rule, params, "unit_cost_by_resolution", "unit_cost")
 		seconds := parseDurationSeconds(params)
 		if actual, exists := actualOutputSeconds(params); exists {
-			return actual * floatValue(rule["unit_cost"])
+			return actual * unitCost
 		}
-		return seconds * billingItemCount(params) * floatValue(rule["unit_cost"])
+		return seconds * billingItemCount(params) * unitCost
 	default:
 		return floatValue(rule["unit_cost"])
 	}

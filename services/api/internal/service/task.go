@@ -38,6 +38,7 @@ type TaskDTO struct {
 	Progress       int                    `json:"progress"`
 	UpstreamStatus string                 `json:"upstream_status,omitempty"`
 	ModelCode      *string                `json:"model_code,omitempty"`
+	ModelName      *string                `json:"model_name,omitempty"`
 	UserName       string                 `json:"user_name,omitempty"`
 	UserEmail      string                 `json:"user_email,omitempty"`
 	Input          map[string]interface{} `json:"input"`
@@ -552,7 +553,7 @@ func (s *TaskService) ListAdmin(ctx context.Context, page, pageSize int, status 
 	args = append(args, pageSize, (page-1)*pageSize)
 	rows, err := s.db.Query(ctx, `
 		SELECT t.task_no, t.upstream_task_id, t.type, t.status, m.code, t.input, t.output, t.estimated_cost, t.actual_cost, t.error_code, t.error_message, t.created_at, t.finished_at,
-		       COALESCE(u.nickname, ''), COALESCE((SELECT a.identifier FROM auth_identities a WHERE a.user_id=u.id AND a.provider='email' ORDER BY a.id LIMIT 1), '')
+		       COALESCE(u.nickname, ''), COALESCE((SELECT a.identifier FROM auth_identities a WHERE a.user_id=u.id AND a.provider='email' ORDER BY a.id LIMIT 1), ''), m.display_name
 		FROM tasks t LEFT JOIN models m ON m.id=t.model_id JOIN users u ON u.id=t.user_id WHERE `+where+` ORDER BY t.created_at DESC LIMIT $`+itoa(argN)+` OFFSET $`+itoa(argN+1), args...)
 	if err != nil {
 		return nil, 0, err
@@ -576,7 +577,7 @@ func scanTasks(rows pgx.Rows, total int, includeUser bool) ([]TaskDTO, int, erro
 		dest := []interface{}{&t.TaskNo, &upstreamTaskID, &t.Type, &t.Status, &t.ModelCode, &input, &output, &t.EstimatedCost, &t.ActualCost,
 			&t.ErrorCode, &t.ErrorMessage, &created, &finished}
 		if includeUser {
-			dest = append(dest, &t.UserName, &t.UserEmail)
+			dest = append(dest, &t.UserName, &t.UserEmail, &t.ModelName)
 		}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, 0, err
@@ -696,7 +697,7 @@ func (s *TaskService) Retry(ctx context.Context, taskNo string) error {
 		if lockedStatus != "failed" {
 			return errors.New("仅失败任务可重试")
 		}
-		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='pending', estimated_cost=$1, actual_cost=0, error_code=NULL, error_message=NULL, finished_at=NULL, retry_count=retry_count+1, input=$3, updated_at=now() WHERE task_no=$2 AND status='failed'`, estimated, taskNo, input)
+		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='pending', estimated_cost=$1, actual_cost=0, upstream_task_id=NULL, route_id=NULL, error_code=NULL, error_message=NULL, finished_at=NULL, retry_count=retry_count+1, input=$3, updated_at=now() WHERE task_no=$2 AND status='failed'`, estimated, taskNo, input)
 		if err != nil {
 			return err
 		}

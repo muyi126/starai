@@ -243,7 +243,9 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	var err error
 	var claimedTaskID int64
 	var currentStatus string
-	if err := pool.QueryRow(ctx, `SELECT id, status FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&claimedTaskID, &currentStatus); err != nil {
+	var acceptedID *string
+	var acceptedRouteID int64
+	if err := pool.QueryRow(ctx, `SELECT id, status, upstream_task_id, COALESCE(route_id,0) FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&claimedTaskID, &currentStatus, &acceptedID, &acceptedRouteID); err != nil {
 		return err
 	}
 	lockConn, err := pool.Acquire(ctx)
@@ -260,7 +262,7 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 		return nil
 	}
 	defer func() { _, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, -claimedTaskID) }()
-	if err := pool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, claimedTaskID).Scan(&currentStatus); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT status, upstream_task_id, COALESCE(route_id,0) FROM tasks WHERE id=$1`, claimedTaskID).Scan(&currentStatus, &acceptedID, &acceptedRouteID); err != nil {
 		return err
 	}
 	if currentStatus != "pending" && currentStatus != "running" {
@@ -312,10 +314,20 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	var lastRouteErr error
 	attempt := 0
 	selectedOK := false
+	if isVideo && strings.EqualFold(stringAny(upstreamMediaConfig(legacyRuntimeRule)["adapter"]), "zex_video") && acceptedID != nil && *acceptedID != "" {
+		selected, err = resumeZexVideoAttempt(routes, acceptedRouteID, *acceptedID, p)
+		if err != nil {
+			return failTask(ctx, pool, p, "MODEL_ROUTE_ERROR", err.Error())
+		}
+		selectedOK = true
+	}
 	// 仅多线路时启用自动切换/熔断降级；单线路保持旧的直连行为。
 	poolEnabled := len(routes) > 1
 routeLoop:
 	for _, route := range routes {
+		if selectedOK {
+			break
+		}
 		if poolEnabled && !acquireWorkerRouteProbe(ctx, pool, route) {
 			continue
 		}
@@ -331,6 +343,13 @@ routeLoop:
 			candidate, callErr := executeWorkerGenerationAttempt(ctx, pool, p, route, isVideo, isAudio, isImage, prompt)
 			latency := int(time.Since(started).Milliseconds())
 			if callErr == nil && candidate.StatusCode < 400 && len(candidate.ResultData) == 0 {
+				if isVideo && strings.EqualFold(stringAny(upstreamMediaConfig(candidate.RuntimeRule)["adapter"]), "zex_video") {
+					if raw, decodeErr := mediaResponseForRule(candidate.ResponseBody, candidate.RuntimeRule); decodeErr == nil && mediaFailureStatus(firstString(raw, "status", "state", "task_status"), candidate.RuntimeRule) {
+						message := firstNonEmpty(mediaBusinessErrorWithRule(raw, candidate.RuntimeRule), firstString(raw, "message", "fail_reason"), "上游任务失败")
+						logWorkerRouteAttempt(ctx, pool, p.TaskNo, p.ModelID, route.ID, attempt, "rejected", candidate.StatusCode, latency)
+						return failTaskPermanently(ctx, pool, p, "MODEL_PROVIDER_ERROR", humanizeUpstreamFailure(message))
+					}
+				}
 				if message := configuredMediaBusinessError(candidate.ResponseBody, candidate.RuntimeRule); message != "" {
 					callErr = fmt.Errorf("%s", message)
 				}
@@ -393,6 +412,10 @@ routeLoop:
 			if err != nil {
 				log.Printf("Task %s poll failed: %v", p.TaskNo, err)
 				markWorkerRouteFailure(ctx, pool, selected.Route.ID, poolEnabled)
+				var terminal *upstreamTerminalError
+				if errors.As(err, &terminal) {
+					return failTaskPermanently(ctx, pool, p, "MODEL_PROVIDER_ERROR", err.Error())
+				}
 				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", err.Error())
 			}
 			if pollUsage.hasAny() {
@@ -1037,7 +1060,7 @@ func workerRouteProviderCost(route workerModelRoute, input map[string]interface{
 		if actual, valid := mediaUsageTokens(input, "_actual_request_count"); valid {
 			count = actual
 		}
-		return count * value("unit_cost")
+		return count * workerDurationTierPrice(route.CostRule, input, "unit_cost_by_duration", "unit_cost")
 	case "per_image":
 		count := intAny(input["n"])
 		if count <= 0 {
@@ -1053,7 +1076,7 @@ func workerRouteProviderCost(route workerModelRoute, input map[string]interface{
 		return float64(count) * unitCost
 	case "per_second":
 		seconds := workerBillableSeconds(input)
-		return seconds * value("unit_cost")
+		return seconds * workerResolutionTierPrice(route.CostRule, input, "unit_cost_by_resolution", "unit_cost")
 	default:
 		return value("unit_cost")
 	}
@@ -1201,6 +1224,8 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 		if err := ensureVideoModel(payload, upstreamModel, p.ModelCode); err != nil {
 			return result, err
 		}
+		upstreamModel = stringAny(payload["model"])
+		result.UpstreamModel = upstreamModel
 	}
 	if isImage && isOpenAIImagesAdapter(route.RuntimeRule) {
 		if strings.HasPrefix(strings.ToLower(stringAny(payload["model"])), "gpt-image-2") {
@@ -2560,6 +2585,18 @@ func postVideoUpstream(ctx context.Context, conn connectionConfig, endpoint stri
 		refURL = strings.TrimSpace(stringAny(payload["input_reference"]))
 	}
 	format := strings.ToLower(stringAny(upstreamMediaConfig(runtimeRule)["request_format"]))
+	if format == "multipart" && strings.EqualFold(stringAny(upstreamMediaConfig(runtimeRule)["adapter"]), "zex_video") {
+		fields := copyMap(payload)
+		var refs []string
+		for _, key := range []string{"images", "videos", "audios"} {
+			refs = append(refs, referenceImageSources(fields[key])...)
+			delete(fields, key)
+		}
+		if len(refs) > 0 {
+			fields["input_reference"] = refs
+		}
+		return doMultipartFilesRequest(ctx, conn, target, fields, nil, upstreamRequestTimeout(runtimeRule, false), 8<<20)
+	}
 	useMultipart := format == "multipart" || (format != "json" && refURL != "" && (strings.HasPrefix(refURL, "data:") || isPrivateMediaURL(refURL)))
 	if useMultipart {
 		if refURL == "" {
@@ -2764,6 +2801,12 @@ func doMultipartFilesRequest(ctx context.Context, conn connectionConfig, target 
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	for k, v := range fields {
+		if values, ok := v.([]string); ok {
+			for _, value := range values {
+				_ = w.WriteField(k, value)
+			}
+			continue
+		}
 		_ = w.WriteField(k, fmt.Sprint(v))
 	}
 	for _, file := range files {
@@ -3143,8 +3186,32 @@ func upstreamContentFailure(raw map[string]interface{}) string {
 
 func humanizeUpstreamFailure(msg string) string {
 	msg = strings.TrimSpace(msg)
+	// Relay gateways can JSON-encode the provider error inside several message
+	// fields. Unwrap before truncating so the actual cause is still visible.
+	code := ""
+	for depth := 0; depth < 8; depth++ {
+		var raw map[string]interface{}
+		if json.Unmarshal([]byte(msg), &raw) != nil || raw == nil {
+			break
+		}
+		if errObj, ok := raw["error"].(map[string]interface{}); ok {
+			raw = errObj
+		}
+		if value := stringAny(raw["code"]); value != "" {
+			code = value
+		}
+		next := firstString(raw, "message", "error_message", "fail_reason", "error")
+		if strings.TrimSpace(next) == "" || next == msg {
+			break
+		}
+		msg = strings.TrimSpace(next)
+	}
+	if code != "" {
+		msg = code + ": " + msg
+	}
+	msg = redactSensitiveLogText(msg)
 	lower := strings.ToLower(msg)
-	if lower == "not_found" || lower == "not found" || strings.Contains(lower, "task not found") {
+	if strings.EqualFold(code, "not_found") || lower == "not_found" || lower == "not found" || strings.Contains(lower, "task not found") {
 		return "上游已接收任务，但后续查询时任务不存在（NOT_FOUND）。可重试当前片段；若再次出现，请切换视频线路或检查该线路的任务查询接口"
 	}
 	if strings.Contains(lower, "tls handshake timeout") {
@@ -3701,7 +3768,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			continue
 		}
 		if message := mediaBusinessErrorWithRule(raw, cfg.RuntimeRule); message != "" {
-			return nil, upstreamUsageDetails{}, fmt.Errorf("%s", humanizeUpstreamFailure(message))
+			return nil, upstreamUsageDetails{}, &upstreamTerminalError{humanizeUpstreamFailure(message)}
 		}
 		status := strings.ToLower(firstString(raw, "status", "state", "task_status"))
 		if mediaFailureStatus(status, cfg.RuntimeRule) {
@@ -3735,7 +3802,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			if msg == "" || msg == "模型服务异常" {
 				msg = "上游任务失败"
 			}
-			return nil, upstreamUsageDetails{}, fmt.Errorf("%s", humanizeUpstreamFailure(msg))
+			return nil, upstreamUsageDetails{}, &upstreamTerminalError{humanizeUpstreamFailure(msg)}
 		case "succeeded", "success", "completed", "done", "finished", "5":
 			raw["task_id"] = upstreamID
 			if failMsg := upstreamContentFailure(raw); failMsg != "" {
@@ -3864,7 +3931,7 @@ func upstreamErrorMessage(body []byte) string {
 	}
 	if errObj, ok := raw["error"].(map[string]interface{}); ok {
 		if msg, ok := errObj["message"].(string); ok && strings.TrimSpace(msg) != "" {
-			return humanizeUpstreamFailure(msg)
+			return humanizeUpstreamFailure(string(body))
 		}
 	}
 	if baseResp, ok := raw["base_resp"].(map[string]interface{}); ok {
@@ -4000,6 +4067,10 @@ func failTaskWithStatusCode(ctx context.Context, pool *pgxpool.Pool, p ImageTask
 		}
 	}
 
+	return failTaskPermanently(ctx, pool, p, code, msg)
+}
+
+func failTaskPermanently(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, code, msg string) error {
 	// Permanent error - mark task as failed
 	var estimated float64
 	if err := pool.QueryRow(ctx, `SELECT estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&estimated); err != nil {

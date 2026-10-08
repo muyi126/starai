@@ -22,7 +22,7 @@ export type FramePairShotState = {
   error?: string;
 };
 
-const FRAME_PAIR_PROFILES = new Set(["frame_pair", "veo_frame_pair", "minimax_h3", "aliyun_multimodal"]);
+const FRAME_PAIR_PROFILES = new Set(["frame_pair", "veo_frame_pair", "minimax_h3", "gateway_reference", "aliyun_multimodal"]);
 
 function videoRuntime(model?: FramePairModel) {
   const rule = model?.runtime_rule?.video;
@@ -30,6 +30,10 @@ function videoRuntime(model?: FramePairModel) {
 }
 
 export function supportsFramePair(model?: FramePairModel) {
+  if (videoRuntime(model).upload_profile === "gateway_reference" || (model?.runtime_rule?.upstream as { adapter?: string })?.adapter === "zex_video") {
+    const fields = model?.input_schema?.properties as Record<string, { enum?: string[] }> | undefined;
+    return fields?.[String(videoRuntime(model).mode_param || "generation_mode")]?.enum?.includes("first_last") === true;
+  }
   return Boolean(model && FRAME_PAIR_PROFILES.has(String(videoRuntime(model).upload_profile || "")));
 }
 
@@ -157,7 +161,7 @@ export function framePairTaskParams(
   const runtime = videoRuntime(model);
   const profile = String(runtime.upload_profile || "");
   const next: Record<string, unknown> = { ...params, duration: params.duration ?? shot.duration, user_prompt: shot.prompt };
-  if (["minimax_h3", "aliyun_multimodal"].includes(profile)) {
+  if (["minimax_h3", "gateway_reference", "aliyun_multimodal"].includes(profile) || (model.runtime_rule?.upstream as { adapter?: string })?.adapter === "zex_video") {
     next[String(runtime.mode_param || "generation_mode")] = shot.firstFrameUrl && shot.lastFrameUrl ? "first_last" : shot.firstFrameUrl ? "first_frame" : "last_frame";
   }
   const frames = runtime.frames && typeof runtime.frames === "object" && !Array.isArray(runtime.frames) ? runtime.frames as Record<string, unknown> : {};

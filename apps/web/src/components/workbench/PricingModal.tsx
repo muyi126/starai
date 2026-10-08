@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { X, Search } from "lucide-react";
 import { clsx } from "clsx";
 import type { Model } from "@starai/shared-types";
-import { apiCached } from "@/lib/api";
+import { apiForLocaleCached } from "@/lib/api";
 import { CATEGORY_TAG, MODEL_ICONS } from "./categoryMeta";
 import { useI18n } from "@/i18n/I18nProvider";
 
@@ -44,7 +44,7 @@ export function PricingModal({
   onClose: () => void;
   currentModelCode?: string;
 }) {
-  const { ts } = useI18n();
+  const { t, ts, locale } = useI18n();
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -54,18 +54,25 @@ export function PricingModal({
 
   useEffect(() => {
     if (!open) return;
+    setActiveCode(currentModelCode);
+  }, [open, currentModelCode]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
     setErr("");
     setLoading(true);
-    setActiveCode(currentModelCode);
-    apiCached<Model[]>("/api/models")
+    setModels([]);
+    apiForLocaleCached<Model[]>("/api/models", locale)
       .then((items) => {
+        if (!active) return;
         setModels(items || []);
-        setActiveCode((prev) => currentModelCode || prev || items?.[0]?.code);
+        setActiveCode((prev) => prev || currentModelCode || items?.[0]?.code);
       })
-      .catch((e) => setErr(e instanceof Error ? e.message : ts("加载失败")))
-      .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, currentModelCode]);
+      .catch((e) => { if (active) setErr(e instanceof Error ? e.message : ts("加载失败")); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [open, currentModelCode, locale, ts]);
 
   useEffect(() => {
     if (!open) return;
@@ -98,6 +105,10 @@ export function PricingModal({
   const price = active?.price_rule as any;
   const billingType = (price?.billing_type || "") as string;
   const unitPrice = num(price?.unit_price);
+  const durationPrices = Object.entries(price?.unit_price_by_duration || {}).map(([duration, value]) => ({ duration, price: num(value) })).sort((a, b) => Number(a.duration) - Number(b.duration));
+  const durationTierBilling = billingType === "per_request" && durationPrices.length > 0;
+  const resolutionPrices = Object.entries(price?.unit_price_by_resolution || {}).map(([resolution, value]) => ({ resolution, price: num(value) }));
+  const resolutionTierBilling = ["per_request", "per_second"].includes(billingType) && resolutionPrices.length > 0;
   const currency = typeof price?.currency === "string" && price.currency ? price.currency : "";
   const surchargePerM = num(price?.surcharge_per_m);
   const isSeedanceDynamic = billingType === "dynamic" && price?.strategy === "seedance_2_tokens";
@@ -122,7 +133,7 @@ export function PricingModal({
     billingType === "per_token"
       ? ts("按 Token 计费")
       : billingType === "per_request"
-        ? ts("按次计费")
+        ? ts(durationTierBilling ? "按时长档位计费" : "按次计费")
         : billingType === "per_image"
           ? ts("按张计费")
           : billingType === "per_second"
@@ -137,13 +148,13 @@ export function PricingModal({
     billingType === "per_token"
       ? ts("按 Token 计费，页面统一换算为每 1M Tokens 展示。")
       : billingType === "per_second"
-        ? ts("按秒计费，通常会受到视频时长与生成数量共同影响。")
+        ? ts(resolutionTierBilling ? "按所选分辨率的每秒单价 × 时长（秒）× 生成数量计费。" : "按秒计费，通常会受到视频时长与生成数量共同影响。")
         : isMiniMaxH3Dynamic
           ? ts("按输出视频时长、参考视频时长和超额参考图片动态计费。")
         : isSeedanceDynamic
           ? ts("按输出 Token 动态计费，分辨率、输出时长和是否包含参考视频都会影响费用。")
         : billingType === "per_request"
-          ? ts("按次计费，每次调用消耗固定额度。")
+          ? ts(durationTierBilling ? "按选择的视频时长收取对应档位的固定费用。" : resolutionTierBilling ? "按所选分辨率收取每次固定费用，时长不额外相乘。" : "按次计费，每次调用消耗固定额度。")
           : ts("查看当前模型的计费方式、展示口径与单价。");
 
   if (!open) return null;
@@ -214,7 +225,7 @@ export function PricingModal({
                 {filtered.map((m) => {
                   const selected = m.code === activeCode;
                   const viewCat = m.category === "multi_collab" ? "chat" : m.category;
-                  const tag = CATEGORY_TAG[m.category] || CATEGORY_TAG[viewCat] || { label: viewCat, className: "bg-gray-100 text-gray-600" };
+                  const tag = CATEGORY_TAG[m.category] || CATEGORY_TAG[viewCat] || { label: viewCat, labelKey: "", className: "bg-gray-100 text-gray-600" };
                   return (
                     <button
                       key={m.code}
@@ -238,10 +249,10 @@ export function PricingModal({
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center justify-between gap-2">
-                            <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{m.display_name}</div>
-                            <span className={clsx("shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", tag.className)}>{tag.label}</span>
+                            <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{ts(m.display_name)}</div>
+                            <span className={clsx("shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", tag.className)}>{tag.labelKey ? t(tag.labelKey) : ts(tag.label)}</span>
                           </div>
-                          <div className="mt-1 line-clamp-2 text-[11px] text-gray-400">{m.description || m.code}</div>
+                          <div className="mt-1 line-clamp-2 text-[11px] text-gray-400">{m.description ? ts(m.description) : m.code}</div>
                         </div>
                       </div>
                     </button>
@@ -267,11 +278,11 @@ export function PricingModal({
                       )}
                     </div>
                     <div className="min-w-0">
-                      <div className="truncate text-lg font-bold text-gray-900 dark:text-gray-100">{active.display_name}</div>
+                      <div className="truncate text-lg font-bold text-gray-900 dark:text-gray-100">{ts(active.display_name)}</div>
                       <div className="mt-0.5 truncate text-xs text-gray-400">{active.code}</div>
                     </div>
                   </div>
-                  {active.description && <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-gray-600 dark:text-gray-300">{active.description}</div>}
+                  {active.description && <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-gray-600 dark:text-gray-300">{ts(active.description)}</div>}
                   {active.tags?.length ? (
                     <div className="mt-3 flex flex-wrap gap-1.5">
                       {active.tags.slice(0, 10).map((t) => (
@@ -293,7 +304,7 @@ export function PricingModal({
                         : isSeedanceDynamic
                           ? ts("预估费用会根据输出时长、分辨率、参考视频时长和官方 Token 单价动态计算。")
                         : billingType === "per_second"
-                          ? ts("费用通常约等于单价 x 时长（秒）x 生成数量，实际以提交参数为准。")
+                          ? ts(resolutionTierBilling ? "按所选分辨率的每秒单价 × 时长（秒）× 生成数量计费。" : "费用通常约等于单价 x 时长（秒）x 生成数量，实际以提交参数为准。")
                         : billingType === "per_token"
                           ? ts("输入、输出、缓存读取等价格会分别展示，方便核对实际成本。")
                           : ts("价格以系统算力度量为准，充值后即可直接调用。")}
@@ -329,25 +340,25 @@ export function PricingModal({
                   {isMiniMaxH3Dynamic ? (
                     <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
                       <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
-                        <div className="text-xs text-gray-400">2K 输出与参考视频</div>
+                        <div className="text-xs text-gray-400">{ts("2K 输出与参考视频")}</div>
                         <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
-                          {minimaxH3Rate === null ? "--" : `${minimaxH3Rate.toFixed(2)} 元`}
+                          {minimaxH3Rate === null ? "--" : t("pricing.currencyCny", { value: minimaxH3Rate.toFixed(2) })}
                         </div>
-                        <div className="mt-1 text-xs text-gray-400">/ 秒</div>
+                        <div className="mt-1 text-xs text-gray-400">{ts(" / 秒")}</div>
                       </div>
                       <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
-                        <div className="text-xs text-gray-400">免费参考图片</div>
+                        <div className="text-xs text-gray-400">{ts("免费参考图片")}</div>
                         <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
-                          {minimaxH3FreeImages === null ? "--" : `${minimaxH3FreeImages} 张`}
+                          {minimaxH3FreeImages === null ? "--" : t("pricing.imageCount", { count: minimaxH3FreeImages })}
                         </div>
-                        <div className="mt-1 text-xs text-gray-400">每次任务</div>
+                        <div className="mt-1 text-xs text-gray-400">{ts("每次任务")}</div>
                       </div>
                       <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
-                        <div className="text-xs text-gray-400">超额参考图片</div>
+                        <div className="text-xs text-gray-400">{ts("超额参考图片")}</div>
                         <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
-                          {minimaxH3ExcessImagePrice === null ? "--" : `${minimaxH3ExcessImagePrice.toFixed(2)} 元`}
+                          {minimaxH3ExcessImagePrice === null ? "--" : t("pricing.currencyCny", { value: minimaxH3ExcessImagePrice.toFixed(2) })}
                         </div>
-                        <div className="mt-1 text-xs text-gray-400">/ 张</div>
+                        <div className="mt-1 text-xs text-gray-400">{ts(" / 张")}</div>
                       </div>
                     </div>
                   ) : isSeedanceDynamic ? (
@@ -357,12 +368,12 @@ export function PricingModal({
                           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{row.resolution}</div>
                           <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
                             <div>
-                              <div className="text-gray-400">不含视频输入</div>
-                              <div className="mt-0.5 font-medium text-gray-700 dark:text-gray-200">{row.withoutVideo ?? "--"} 元 / 1M Tokens</div>
+                              <div className="text-gray-400">{ts("不含视频输入")}</div>
+                              <div className="mt-0.5 font-medium text-gray-700 dark:text-gray-200">{t("pricing.currencyCny", { value: row.withoutVideo ?? "--" })} / 1M Tokens</div>
                             </div>
                             <div>
-                              <div className="text-gray-400">包含视频输入</div>
-                              <div className="mt-0.5 font-medium text-gray-700 dark:text-gray-200">{row.withVideo ?? "--"} 元 / 1M Tokens</div>
+                              <div className="text-gray-400">{ts("包含视频输入")}</div>
+                              <div className="mt-0.5 font-medium text-gray-700 dark:text-gray-200">{t("pricing.currencyCny", { value: row.withVideo ?? "--" })} / 1M Tokens</div>
                             </div>
                           </div>
                         </div>
@@ -380,19 +391,38 @@ export function PricingModal({
                         </div>
                       ))}
                     </div>
+                  ) : durationTierBilling ? (
+                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      {durationPrices.map((tier) => (
+                        <div key={tier.duration} className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                          <div className="text-xs text-gray-400">{t("pricing.durationSeconds", { seconds: tier.duration })}</div>
+                          <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">{tier.price === null ? "--" : tier.price.toFixed(4)}</div>
+                          <div className="mt-1 text-xs text-gray-400">{ts("算力 / 次")}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : resolutionTierBilling ? (
+                    <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {[...resolutionPrices, { resolution: ts("其他情况（Other cases）"), price: unitPrice }].map((tier) => (
+                        <div key={tier.resolution} className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                          <div className="text-xs text-gray-400">{tier.resolution}</div>
+                          <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">{tier.price === null ? "--" : tier.price.toFixed(6)}</div>
+                          <div className="mt-1 text-xs text-gray-400">{ts(billingType === "per_request" ? "算力 / 次" : "算力 / 秒")}</div>
+                        </div>
+                      ))}
+                    </div>
                   ) : billingType === "per_second" || billingType === "per_request" || billingType === "per_image" ? (
                     <div className="mt-3">
                       <div className="inline-block min-w-[180px] rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
-                        <div className="text-xs text-gray-400">单价</div>
+                        <div className="text-xs text-gray-400">{ts("单价")}</div>
                         <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">{unitPrice === null ? "--" : unitPrice.toFixed(4)}</div>
                         <div className="mt-1 text-xs text-gray-400">
-                          算力
-                          {billingType === "per_second" ? ts(" / 秒") : billingType === "per_image" ? ts(" / 张") : ts(" / 次")}
+                          {ts(billingType === "per_second" ? "算力 / 秒" : billingType === "per_image" ? "算力 / 张" : "算力 / 次")}
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">该模型暂时没有固定单价配置。</div>
+                    <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">{ts("该模型暂时没有固定单价配置。")}</div>
                   )}
                 </div>
               </div>

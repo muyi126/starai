@@ -211,13 +211,14 @@ export default function TasksPage() {
         </select>
         <span className="text-xs text-gray-400">共 {filtered.length} 个</span>
       </div>
-      <div className="bg-white rounded-2xl border overflow-hidden">
+      <div className="bg-white rounded-2xl border overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-500">
             <tr>
               <th className="text-left px-4 py-3">任务号</th>
               <th className="text-left px-4 py-3">用户</th>
               <th className="text-left px-4 py-3">类型</th>
+              <th className="text-left px-4 py-3">模型</th>
               <th className="text-left px-4 py-3">时间</th>
               <th className="text-left px-4 py-3">状态</th>
               <th className="text-left px-4 py-3">预估/实际</th>
@@ -241,6 +242,9 @@ export default function TasksPage() {
                   <div className="text-[11px] text-gray-400 mt-0.5 break-all">{t.user_email || "—"}</div>
                 </td>
                 <td className="px-4 py-3">{t.type}</td>
+                <td className="px-4 py-3">
+                  <div className="max-w-xs truncate" title={t.model_name || t.model_code}>{t.model_name || t.model_code || "—"}</div>
+                </td>
                 <td className="px-4 py-3 whitespace-nowrap">
                   <div className="text-xs text-gray-700">{timeFmt(t.created_at)}</div>
                   <div className="text-[11px] text-gray-400 mt-0.5">{timeFmt(t.finished_at)}</div>

@@ -1,3 +1,4 @@
+import videoPricing from "./supplements/ko-KR/videoPricing.ts";
 import virtualTryOn from "./supplements/ko-KR/virtualTryOn.ts";
 import agentCanvas from "./supplements/ko-KR/agentCanvas.ts";
 import productRefine from "./supplements/ko-KR/productRefine.ts";
@@ -8,6 +9,8 @@ import agentWorkspace from "./supplements/ko-KR/agentWorkspace.ts";
 import commerceVideo from "./supplements/ko-KR/commerceVideo.ts";
 
 const sourceTranslations: Record<string, string> = {
+  "AI 大模型聚合平台": "AI 모델 통합 플랫폼",
+  "一个入口完成对话理解、图片、视频、语音和音乐创作。": "하나의 작업 공간에서 대화·이미지·동영상·음성·음악을 만들 수 있습니다.",
   "API 文档中心": "API 문서",
   "聊天与文本": "채팅 및 텍스트",
   "平台": "플랫폼",
@@ -535,5 +538,7 @@ Object.assign(sourceTranslations, photoStudio);
 Object.assign(sourceTranslations, virtualTryOnExtra);
 Object.assign(sourceTranslations, agentWorkspace);
 Object.assign(sourceTranslations, commerceVideo);
+
+Object.assign(sourceTranslations, videoPricing);
 
 export default sourceTranslations;

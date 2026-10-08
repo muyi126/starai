@@ -899,7 +899,7 @@ const dictionary: Record<string, string> = {
     "video.option.orientation.portrait": "Portrait",
     "video.option.orientation.landscape": "Landscape",
     "video.generationMode": "Input combination",
-    "video.generationModeDesc": "Choose an officially supported text, image, video, audio, or draft-task combination",
+    "video.generationModeDesc": "Choose an input combination and upload matching media. Available combinations depend on the model configuration.",
     "video.portraitAsset": "Portrait asset",
     "video.portraitImage": "Portrait image",
     "video.portraitVideo": "Portrait video",
@@ -1261,6 +1261,17 @@ Object.assign(dictionary, {
   "upscale.noAssets": "No videos in the asset library",
   "upscale.historyTitle": "Enhancement history",
   "upscale.noHistory": "No task history"
+});
+
+Object.assign(dictionary, {
+  "video.materialBudget": "Images, videos and audio: {total}/{limit} items; {remaining} remaining",
+  "video.materialRemaining": "You can add {remaining} more items. Images, videos and audio share the same limit.",
+  "video.materialLimit": "Images, videos and audio are limited to {limit} items in total.",
+  "workspace.estimatePerRun": "Est. {value} credits / run",
+  "workspace.estimateAmount": "Est. {value} credits",
+  "pricing.durationSeconds": "{seconds} seconds",
+  "pricing.imageCount": "{count} images",
+  "pricing.currencyCny": "{value} CNY"
 });
 
 export default dictionary;

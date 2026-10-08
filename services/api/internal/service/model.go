@@ -348,9 +348,9 @@ func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interfac
 		promptTokens, outputTokens = estimatedTokenCounts(model.PriceRule, params, promptTokens, outputTokens)
 		return tokenCostFromRule(model.PriceRule, promptTokens, outputTokens, 0, 0) * modelTokenItemCount(model, params)
 	case "per_request":
-		return floatValue(model.PriceRule["unit_price"])
+		return durationTierPrice(model.PriceRule, params, "unit_price_by_duration", "unit_price")
 	case "per_second":
-		unitPrice := floatValue(model.PriceRule["unit_price"])
+		unitPrice := resolutionTierPrice(model.PriceRule, params, "unit_price_by_resolution", "unit_price")
 		duration := parseDurationSeconds(params)
 		if actual, exists := actualOutputSeconds(params); exists {
 			return unitPrice * actual
@@ -511,6 +511,26 @@ func imageTierPrice(rule, params map[string]interface{}, tierMapKey, fallbackKey
 			if strings.EqualFold(strings.TrimSpace(key), tier) {
 				return floatValue(value)
 			}
+		}
+	}
+	return floatValue(rule[fallbackKey])
+}
+
+// Fixed request prices prefer duration tiers, then resolution, never output time.
+func durationTierPrice(rule, params map[string]interface{}, tierMapKey, fallbackKey string) float64 {
+	if prices, ok := rule[tierMapKey].(map[string]interface{}); ok {
+		if value, exists := prices[strconv.FormatFloat(parseDurationSeconds(params), 'f', -1, 64)]; exists {
+			return floatValue(value)
+		}
+	}
+	return resolutionTierPrice(rule, params, fallbackKey+"_by_resolution", fallbackKey)
+}
+
+func resolutionTierPrice(rule, params map[string]interface{}, tierMapKey, fallbackKey string) float64 {
+	resolution := strings.ToLower(strings.TrimSpace(stringValue(params["resolution"])))
+	if prices, ok := rule[tierMapKey].(map[string]interface{}); ok {
+		if value, exists := prices[resolution]; exists {
+			return floatValue(value)
 		}
 	}
 	return floatValue(rule[fallbackKey])
@@ -1659,6 +1679,12 @@ func (s *ModelService) SetEnabled(ctx context.Context, id int64, enabled bool) (
 }
 
 func validateModelPriceRule(rule map[string]interface{}) error {
+	if err := normalizeResolutionTierPrices(rule, "unit_price_by_resolution"); err != nil {
+		return err
+	}
+	if err := normalizeDurationTierPrices(rule, "unit_price_by_duration"); err != nil {
+		return err
+	}
 	billingType := strings.ToLower(strings.TrimSpace(stringValue(rule["billing_type"])))
 	allowed := map[string]bool{"per_token": true, "per_image": true, "per_request": true, "per_second": true, "dynamic": true}
 	if !allowed[billingType] {
@@ -1707,6 +1733,47 @@ func validateModelPriceRule(rule map[string]interface{}) error {
 		strategy := strings.ToLower(strings.TrimSpace(stringValue(rule["strategy"])))
 		if strategy != "seedance_2_tokens" && strategy != "minimax_h3_seconds" && floatValue(rule["fallback_cost"]) <= 0 {
 			return errors.New("动态计费策略无效，且未配置 fallback_cost")
+		}
+	}
+	return nil
+}
+
+func normalizeDurationTierPrices(rule map[string]interface{}, key string) error {
+	value, exists := rule[key]
+	if !exists {
+		return nil
+	}
+	prices, ok := value.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("计费字段 %s 必须是时长价格映射", key)
+	}
+	for duration := range prices {
+		seconds, err := strconv.Atoi(duration)
+		if err != nil || seconds < 1 || strconv.Itoa(seconds) != duration {
+			return fmt.Errorf("计费字段 %s 的时长必须是正整数字符串", key)
+		}
+		if err := normalizePriceNumber(prices, duration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeResolutionTierPrices(rule map[string]interface{}, key string) error {
+	value, exists := rule[key]
+	if !exists {
+		return nil
+	}
+	prices, ok := value.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("计费字段 %s 必须是分辨率价格映射", key)
+	}
+	for resolution := range prices {
+		if resolution == "" || resolution != strings.ToLower(strings.TrimSpace(resolution)) {
+			return fmt.Errorf("计费字段 %s 的分辨率必须是非空小写字符串", key)
+		}
+		if err := normalizePriceNumber(prices, resolution); err != nil {
+			return err
 		}
 	}
 	return nil
