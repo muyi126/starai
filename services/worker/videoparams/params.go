@@ -19,6 +19,17 @@ func BuildUpstreamVideoPayload(
 	if modelName == "" {
 		modelName = modelCode
 	}
+	if prompt, ok := params["prompt"].(string); ok {
+		converted := convertVideoReferencePrompt(prompt, upCfg.Adapter, modelName+" "+modelCode+" "+fmt.Sprint(runtimeRule["template_key"]))
+		if converted != prompt {
+			copy := make(map[string]interface{}, len(params))
+			for key, value := range params {
+				copy[key] = value
+			}
+			copy["prompt"] = converted
+			params = copy
+		}
+	}
 	out := map[string]interface{}{}
 	setPayloadValue(out, mappedUpstreamKey(upCfg, "model", "model"), modelName)
 	if prompt, ok := params["prompt"].(string); ok {

@@ -28,6 +28,9 @@ import {
   buildAudioTaskParams,
   buildVideoTaskParams,
   selectVideoTaskMedia,
+  supportsVideoPromptReferences,
+  videoPromptReferences,
+  invalidVideoReferences,
   videoReferenceCapacity,
   EMPTY_VIDEO_MEDIA,
   canonicalVideoSize,
@@ -50,6 +53,7 @@ import { BottomBar, ChatTopTools, type BottomBarState } from "./BottomBar";
 import { AudioOptionToolbar, AudioTopControls } from "./audio/AudioOptionToolbar";
 import { AudioUploadButton } from "./audio/AudioUploadButton";
 import { VideoUploadArea } from "./video/VideoUploadArea";
+import { VideoPromptTextarea } from "./video/VideoPromptTextarea";
 import { VideoOptionToolbar, VideoTopControls } from "./video/VideoOptionToolbar";
 import { ALL_RATIOS, ImageGenerationToolbar, buildImageGenerationParams, normalizeRatio, normalizeTier, type ImageAspectRatio, type ImageSizeTier } from "./ImageGenerationToolbar";
 import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } from "./GenerationLanguageMenu";
@@ -994,6 +998,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     () => normalizeSizeBasedVideoParams(params, model.runtime_rule),
     [params, model.runtime_rule]
   );
+  const videoMentionsEnabled = isVideo && supportsVideoPromptReferences(model);
+  const promptReferences = useMemo(() => videoMentionsEnabled ? videoPromptReferences(params, videoTaskMedia, model.runtime_rule) : [], [videoMentionsEnabled, params, videoTaskMedia, model.runtime_rule]);
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
       ? videoConfig.reference_images?.max ?? 4
@@ -1728,6 +1734,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   };
 
   const handleMediaTask = async () => {
+    const invalidMentions = videoMentionsEnabled ? invalidVideoReferences(prompt, promptReferences) : [];
+    if (invalidMentions.length) {
+      alert(t("video.mentionInvalid", { references: invalidMentions.join("、") }));
+      return;
+    }
     if (isVideo && videoConfig.prompt_required !== false && !prompt.trim()) {
       alert(t("workspace.enterPrompt"));
       return;
@@ -2658,7 +2669,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
               <div className={clsx("flex flex-col", !stackVideoInput && "md:flex-row md:items-stretch")}>
                 <div className={clsx("w-full min-w-0 px-3 pt-3 sm:px-4", !stackVideoInput && "pb-3 md:w-auto md:max-w-[62%] md:flex-none md:pr-1")}>
                   <VideoUploadArea
-                    config={videoUploadConfig}
+                    references={videoMentionsEnabled ? promptReferences : undefined} config={videoUploadConfig}
                     media={videoMedia}
                     onChange={setVideoMedia}
                     mode={videoMaterialMode}
@@ -2670,7 +2681,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                   />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">
-                  <textarea
+                  <VideoPromptTextarea enabled={videoMentionsEnabled} references={promptReferences} onValueChange={setPrompt}
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
                     placeholder={promptPlaceholder}
@@ -2688,9 +2699,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
             ) : isVideo ? (
               <div className="flex flex-col">
                 <div className="px-3 pt-3 sm:px-4">
-                  <VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={isEnhancedVideoMaterial ? videoMaterialMode : undefined} />
+                  <VideoUploadArea references={videoMentionsEnabled ? promptReferences : undefined} config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={isEnhancedVideoMaterial ? videoMaterialMode : undefined} />
                 </div>
-                <textarea
+                <VideoPromptTextarea enabled={videoMentionsEnabled} references={promptReferences} onValueChange={setPrompt}
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                   placeholder={promptPlaceholder}

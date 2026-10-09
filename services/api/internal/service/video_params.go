@@ -93,9 +93,15 @@ func ValidateVideoParams(model *ModelFull, params map[string]interface{}) error 
 		if err := validateZexVideoParams(model, cfg, params); err != nil {
 			return err
 		}
+		if err := validateVideoPromptReferences(model, cfg, params); err != nil {
+			return err
+		}
 		return validateSchemaParams(model.InputSchema, params)
 	}
 	if err := validateVideoUpload(cfg, params); err != nil {
+		return err
+	}
+	if err := validateVideoPromptReferences(model, cfg, params); err != nil {
 		return err
 	}
 	return validateSchemaParams(model.InputSchema, params)

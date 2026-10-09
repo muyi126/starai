@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { MULTIMEDIA_TEMPLATES, applyMultimediaTemplate, configureZexUploadProfile } from "../../../../admin/src/lib/multimedia-templates.ts";
-import { buildVideoTaskParams, selectVideoTaskMedia, parseVideoRuntime, videoReferenceCapacity, schemaCountConfig, enumLabel, schemaFieldEntries, isTopPlacementField, canonicalVideoSize, isSizeBasedVideoProfile } from "../../../../../packages/shared-types/src/videoModel.ts";
+import { buildVideoTaskParams, selectVideoTaskMedia, parseVideoRuntime, videoReferenceCapacity, schemaCountConfig, enumLabel, schemaFieldEntries, isTopPlacementField, canonicalVideoSize, isSizeBasedVideoProfile, invalidVideoReferences } from "../../../../../packages/shared-types/src/videoModel.ts";
 
 function sourceFile(path) {
   return ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -25,6 +25,27 @@ function elements(node) {
   return [node, ...elements(node.props?.children)];
 }
 const React = { Fragment: "fragment", createElement: (type, props, ...children) => ({ type, props: { ...props, children } }) };
+
+test("video Agent submits only active media without restoring stale schema values", () => {
+  const source = sourceFile("AgentWorkspace.tsx");
+  const context = {
+    isVideoGeneration: true, params: { generation_mode: "text", reference_images: ["stale"], reference_videos: ["old-video"] },
+    videoMedia: { first_frame: null, last_frame: null, reference_images: [{ url: "hidden", public_id: "hidden-id" }], reference_videos: [], reference_audios: [] },
+    generationModel: { runtime_rule: { upstream: { adapter: "zex_video" } } },
+    useMemo: fn => fn(), selectVideoTaskMedia, buildVideoTaskParams, productImage: null,
+  };
+  for (const name of ["selectedVideoMedia", "videoParams", "imageURL", "referenceAssetIds"]) {
+    execute(`var ${findNode(source, n => ts.isVariableDeclaration(n) && n.name.getText(source) === name).getText(source)};`, context);
+  }
+  const inputs = findNode(source, n => ts.isPropertyAssignment(n) && n.name.getText(source) === "inputs" && ts.isObjectLiteralExpression(n.initializer));
+  const spread = inputs.initializer.properties.find(n => ts.isSpreadAssignment(n) && n.getText(source).includes("isVideoGeneration ? videoParams"));
+  assert.ok(spread, "video inputs must use cleaned videoParams instead of restoring params");
+  execute(`var submitted = { ${spread.getText(source)} };`, context);
+  assert.equal(context.submitted.reference_images, undefined);
+  assert.equal(context.submitted.reference_videos, undefined);
+  assert.equal(context.imageURL, "");
+  assert.equal(context.referenceAssetIds.length, 0);
+});
 
 test("admin Zex reference maximum updates the effective image slot without changing native frame limits", () => {
   const source = sourceFile("../../../../admin/src/app/admin/models/page.tsx");
@@ -303,12 +324,14 @@ test("submit guards distinguish required first-frame video, optional first-frame
     [{ isGatewayVideo: true, videoMaterialMode: "first_frame", videoMedia: { first_frame: { url: "first.png" }, reference_images: [], reference_videos: [], reference_audios: [] } }, true],
     [{ isGatewayVideo: true, videoMaterialMode: "reference", videoMedia: { reference_images: [], reference_videos: [], reference_audios: [{ url: "ref.mp3" }] } }, true],
     [{ videoReferenceBudget: { total: 10, limit: 9 } }, false],
+    [{ videoMentionsEnabled: true, prompt: "参考@图片2", promptReferences: [{ kind: "image", index: 1, url: "a" }] }, false],
+    [{ videoMentionsEnabled: true, prompt: "参考@图片1", promptReferences: [{ kind: "image", index: 1, url: "a" }] }, true],
     [{ isVideo: false, isImage: true, imageRuntime: { min_reference_images: 1 }, refImages: [] }, false],
     [{ isVideo: false, isAudio: true, workbenchInputSchema: { required: ["voice"], properties: { voice: { type: "string", title: "音色 ID" } } }, params: { voice: " " } }, false],
     [{ isVideo: false, isAudio: true, workbenchInputSchema: { required: ["voice"], properties: { voice: { type: "string", title: "音色 ID" } } }, params: { voice: "voice-id" } }, true],
   ]) {
     const alerts = [];
-    const context = { isVideo: true, isAudio: false, isImage: false, prompt: "test prompt", videoConfig: {}, audioConfig: {}, imageRuntime: {}, workbenchInputSchema: {}, params: {}, schemaProperties: (schema) => schema.properties || {}, videoMedia: { reference_images: [] }, refImages: [], isMiniMaxH3: false, isGatewayVideo: false, videoMaterialMode: "text", isAliyunMultimodal: false, isAliyunHappyHorse: false, isVeoFramePair: false, isVeoReference: false, isOmniReference: false, t: (key) => key, ts: (key) => key, alert: (message) => alerts.push(message), ...overrides };
+    const context = { videoMentionsEnabled: false, promptReferences: [], invalidVideoReferences, isVideo: true, isAudio: false, isImage: false, prompt: "test prompt", videoConfig: {}, audioConfig: {}, imageRuntime: {}, workbenchInputSchema: {}, params: {}, schemaProperties: (schema) => schema.properties || {}, videoMedia: { reference_images: [] }, refImages: [], isMiniMaxH3: false, isGatewayVideo: false, videoMaterialMode: "text", isAliyunMultimodal: false, isAliyunHappyHorse: false, isVeoFramePair: false, isVeoReference: false, isOmniReference: false, t: (key) => key, ts: (key) => key, alert: (message) => alerts.push(message), ...overrides };
     context.videoReferenceBudget ||= { total: 0, limit: undefined };
     execute(`async function validate() { ${prefix}\nreturn true; }`, context);
     assert.equal(await context.validate(), expected ? true : undefined);
@@ -381,7 +404,7 @@ test("video menus honor custom titles, explicit select widgets and top order", (
 
 test("size-based video display retains a configured subset and presentation instead of expanding it", () => {
   const source = sourceFile("ModelWorkspace.tsx");
-  const ctx = { canonicalVideoSize, isSizeBasedVideoProfile };
+  const ctx = { canonicalVideoSize, isSizeBasedVideoProfile, invalidVideoReferences };
   execute(findNode(source, n => ts.isFunctionDeclaration(n) && n.name?.text === "sizeBasedVideoSchema").getText(source), ctx);
   const result = ctx.sizeBasedVideoSchema({ properties: { size: { type: "string", enum: ["720x1280"], title: "竖屏尺寸", default: "720x1280", "x-widget": "select", "x-icon": "custom" } } }, { video: { upload_profile: "veo_reference" } }, {});
   assert.deepEqual(Array.from(result.properties.size.enum), ["720x1280"]);

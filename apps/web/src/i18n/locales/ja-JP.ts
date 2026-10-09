@@ -998,4 +998,11 @@ Object.assign(dictionary, {
   "pricing.currencyCny": "{value} 人民元"
 });
 
+Object.assign(dictionary, {
+  "video.mentionOpen": "素材を参照",
+  "video.mentionHint": "@ を入力してアップロード済み素材を参照",
+  "video.mentionEmpty": "一致する素材がありません。アップロードするか素材ライブラリから選択してください。",
+  "video.mentionInvalid": "参照 {references} は無効です。現在のモードの素材を選び直してください。"
+});
+
 export default dictionary;

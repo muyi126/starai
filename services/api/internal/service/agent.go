@@ -343,6 +343,9 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 	if !def.IsEnabled {
 		return nil, errors.New("智能体已下线")
 	}
+	if err := s.validateWorkflowVideoReferences(ctx, def.RuntimeConfig, inputs); err != nil {
+		return nil, err
+	}
 	if stringValue(def.RuntimeConfig["agent_mode"]) == "comic_drama" {
 		inputs = mergeComicDramaRuntimeDefaults(def.RuntimeConfig, inputs)
 		if err := s.validateComicDramaGenerationModels(ctx, inputs); err != nil {
@@ -1895,6 +1898,9 @@ func (s *AgentService) retryProject(ctx context.Context, userID int64, publicID 
 	_ = json.Unmarshal(outputsRaw, &outputs)
 	_ = json.Unmarshal(runtimeRaw, &runtimeCfg)
 	refreshComicRetryModels(inputs, outputs, runtimeCfg, modelOverrides)
+	if err := s.validateWorkflowVideoReferences(ctx, runtimeCfg, inputs); err != nil {
+		return err
+	}
 	if stringValue(runtimeCfg["agent_mode"]) == "comic_drama" {
 		fillComicResumeModelDefaults(inputs, runtimeCfg)
 		work := remainingComicWork(inputs, outputs, runtimeCfg)

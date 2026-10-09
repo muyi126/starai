@@ -998,4 +998,11 @@ Object.assign(dictionary, {
   "pricing.currencyCny": "{value} NDT"
 });
 
+Object.assign(dictionary, {
+  "video.mentionOpen": "Tham chiếu tư liệu",
+  "video.mentionHint": "Nhập @ để tham chiếu tư liệu đã tải lên",
+  "video.mentionEmpty": "Không có tư liệu phù hợp. Hãy tải lên hoặc chọn từ thư viện trước.",
+  "video.mentionInvalid": "Tham chiếu {references} không còn khả dụng. Hãy chọn lại tư liệu trong chế độ hiện tại."
+});
+
 export default dictionary;

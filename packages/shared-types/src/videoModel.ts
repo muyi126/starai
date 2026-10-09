@@ -230,11 +230,12 @@ export function schemaCountConfig(prop: SchemaFieldMeta, runtime: Pick<VideoRunt
 }
 
 export function selectVideoTaskMedia(params: Record<string, unknown>, media: VideoMediaState, runtimeRule?: Record<string, unknown>): VideoMediaState {
-  if (asRecord(runtimeRule?.upstream).adapter !== "zex_video") return media;
   const cfg = parseVideoRuntime(runtimeRule);
+  const adapter = String(asRecord(runtimeRule?.upstream).adapter || "");
+  if (!["zex_video", "volcengine_seedance_2", "topenrouter_seedance_2", "minimax_h3_v2"].includes(adapter) && !["seedance_2", "minimax_h3"].includes(String(cfg.upload_profile))) return media;
   const mode = String(params[cfg.mode_param || "generation_mode"] || "text");
-  return mode === "text" || cfg.upload_profile === "none" ? EMPTY_VIDEO_MEDIA
-    : mode === "first_frame" || mode === "first_last" ? { ...EMPTY_VIDEO_MEDIA, first_frame: media.first_frame, last_frame: mode === "first_last" ? media.last_frame : null }
+  return mode === "text" || mode === "draft_task" || cfg.upload_profile === "none" ? EMPTY_VIDEO_MEDIA
+    : ["first_frame", "last_frame", "first_last"].includes(mode) ? { ...EMPTY_VIDEO_MEDIA, first_frame: mode !== "last_frame" ? media.first_frame : null, last_frame: mode !== "first_frame" ? media.last_frame : null }
     : { ...media, first_frame: null, last_frame: null,
       reference_images: mode === "reference" || mode.split("_").includes("image") ? media.reference_images : [],
       reference_videos: !["single_ref", "multi_ref"].includes(String(cfg.upload_profile)) && (mode === "reference" || mode.split("_").includes("video")) ? media.reference_videos : [],
@@ -253,7 +254,7 @@ export function buildVideoTaskParams(
   const refVideoKey = cfg.reference_videos?.key || "reference_videos";
   const refAudioKey = cfg.reference_audios?.key || "reference_audios";
   const out: Record<string, unknown> = { ...params };
-  if (asRecord(runtimeRule?.upstream).adapter === "zex_video") {
+  if (["zex_video", "volcengine_seedance_2", "topenrouter_seedance_2", "minimax_h3_v2"].includes(String(asRecord(runtimeRule?.upstream).adapter)) || ["seedance_2", "minimax_h3"].includes(String(cfg.upload_profile))) {
     for (const key of [firstKey, lastKey, refKey, refVideoKey, refAudioKey, "reference_video_duration_seconds"]) delete out[key];
   }
   media = selectVideoTaskMedia(params, media, runtimeRule);
@@ -268,6 +269,85 @@ export function buildVideoTaskParams(
   if (referenceVideoDuration > 0) out.reference_video_duration_seconds = referenceVideoDuration;
   if (media.reference_audios.length) out[refAudioKey] = media.reference_audios.map((x) => x.url);
   return out;
+}
+
+export interface VideoPromptReference extends VideoMediaItem {
+  kind: "image" | "video" | "audio";
+  index: number;
+}
+
+/** Enable only verified multimodal protocols, not every video upload template. */
+export function supportsVideoPromptReferences(model?: { code?: string; runtime_rule?: Record<string, unknown> } | null): boolean {
+  const rule = model?.runtime_rule;
+  const adapter = String(asRecord(rule?.upstream).adapter || "");
+  if (["volcengine_seedance_2", "topenrouter_seedance_2", "minimax_h3_v2"].includes(adapter)) return true;
+  return adapter === "zex_video" && /seedance[_-]2[._-][05]|minimax[_-]h3/i.test(`${model?.code} ${rule?.template_key}`);
+}
+
+export function videoPromptReferences(params: Record<string, unknown>, media: VideoMediaState, runtimeRule?: Record<string, unknown>): VideoPromptReference[] {
+  const selected = selectVideoTaskMedia(params, media, runtimeRule);
+  const groups: Record<VideoPromptReference["kind"], VideoMediaItem[]> = {
+    image: [selected.first_frame, selected.last_frame, ...selected.reference_images].filter((item): item is VideoMediaItem => Boolean(item)),
+    video: [...selected.reference_videos], audio: [...selected.reference_audios],
+  };
+  const mode = String(params[parseVideoRuntime(runtimeRule).mode_param || "generation_mode"] || "text");
+  const candidates = (["image", "video", "audio"] as const).flatMap(kind => groups[kind].map(item => ({ ...item, kind })));
+  if (["volcengine_seedance_2", "topenrouter_seedance_2"].includes(String(asRecord(runtimeRule?.upstream).adapter)) && params.portrait_asset_id && /image|video/.test(mode)) {
+    const kind = params.portrait_asset_type === "video" ? "video" : "image";
+    const id = String(params.portrait_asset_id).replace(/^asset:\/\//, "");
+    candidates.unshift({ url: `asset://${id}`, name: id, kind });
+  }
+  const seen = new Set<string>();
+  const counts = { image: 0, video: 0, audio: 0 };
+  return candidates.filter(item => {
+    if (!item.url || (asRecord(runtimeRule?.upstream).adapter !== "zex_video" && seen.has(item.url))) return false;
+    seen.add(item.url);
+    return true;
+  }).map(item => ({ ...item, index: ++counts[item.kind] }));
+}
+
+export function videoReferenceToken(reference: Pick<VideoPromptReference, "kind" | "index">, locale: string) {
+  const kind = locale.startsWith("zh") ? { image: "图片", video: "视频", audio: "音频" }[reference.kind] : reference.kind;
+  return `@${kind}${reference.index}`;
+}
+
+const videoMentionPattern = () => /@(图片|圖片|图像|视频|視頻|音频|音頻|image|video|audio)([0-9]+|\?)(?![a-zA-Z0-9_])/gi;
+function videoMentionMatches(prompt: string) {
+  let end = -1;
+  return [...prompt.matchAll(videoMentionPattern())].filter(match => {
+    if (match.index !== end && /[a-zA-Z0-9_@]/.test(prompt[match.index - 1] || "")) return false;
+    end = match.index + match[0].length;
+    return true;
+  });
+}
+function videoMentionKind(label: string): VideoPromptReference["kind"] {
+  return /^(图片|圖片|图像|image)$/i.test(label) ? "image" : /^(视频|視頻|video)$/i.test(label) ? "video" : "audio";
+}
+
+/** Reindex by asset identity in one pass; never silently bind a removed asset to its successor. */
+export function reconcileVideoReferences(prompt: string, previous: VideoPromptReference[], next: VideoPromptReference[]): string {
+  const starts = new Set(videoMentionMatches(prompt).map(match => match.index));
+  return prompt.replace(videoMentionPattern(), (token, label: string, number: string, offset: number) => {
+    if (!starts.has(offset)) return token;
+    if (number === "?") return token;
+    const kind = videoMentionKind(label);
+    const old = previous.find(item => item.kind === kind && item.index === Number(number));
+    if (!old) return token;
+    const sameAsset = (item: VideoPromptReference) => item.kind === kind && (old.public_id && item.public_id ? item.public_id === old.public_id : item.url === old.url);
+    const occurrence = previous.filter(item => item.index < old.index && sameAsset(item)).length;
+    const matches = next.filter(sameAsset);
+    const current = matches[occurrence] || matches[0];
+    return `@${label}${current?.index ?? "?"}`;
+  });
+}
+
+export function invalidVideoReferences(prompt: string, references: VideoPromptReference[]): string[] {
+  return videoMentionMatches(prompt).filter(match => !references.some(item => item.kind === videoMentionKind(match[1]) && item.index === Number(match[2]))).map(match => match[0]);
+}
+
+export function videoMentionQuery(value: string, caret: number) {
+  const match = /(?<![a-zA-Z0-9_@])@([^@\s,，。;；!?！？<>]*)$/.exec(value.slice(0, caret));
+  return match ? { start: caret - match[0].length, end: caret, query: match[1] } : null;
 }
 
 const SIZE_BASED_VIDEO_PROFILES = new Set(["veo_frame_pair", "veo_reference", "omni_reference"]);

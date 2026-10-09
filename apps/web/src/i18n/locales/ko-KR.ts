@@ -998,4 +998,11 @@ Object.assign(dictionary, {
   "pricing.currencyCny": "{value} 위안"
 });
 
+Object.assign(dictionary, {
+  "video.mentionOpen": "소재 참조",
+  "video.mentionHint": "@를 입력하여 업로드한 소재 참조",
+  "video.mentionEmpty": "일치하는 소재가 없습니다. 먼저 업로드하거나 자산 라이브러리에서 선택하세요.",
+  "video.mentionInvalid": "참조 {references}을(를) 사용할 수 없습니다. 현재 모드의 소재를 다시 선택하세요."
+});
+
 export default dictionary;

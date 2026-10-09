@@ -184,3 +184,23 @@ Grok 图片编辑协议与 OpenAI multipart 编辑不同，本次新增的是原
 本地开发环境一次预热后的服务端 HTML 响应：首页约 409ms、MiniMax 工作台约 83ms。这不代表完整浏览器加载时间，也不能推算线上或供应商生成耗时；Next.js 开发模式的首次编译仍会增加等待时间。
 
 需要管理员补齐的配置：当前八条线路的 `cost_rule.unit_cost` 均为 0。用户售价有值且可独立扣费，但供应商成本与利润统计会缺少真实成本。按供应商合同、线路计费方式和系统币值填写实际成本；分辨率或时长分档成本可分别使用 `unit_cost_by_resolution` / `unit_cost_by_duration`，不要直接把供应商人民币售价当作用户算力售价。
+
+### 2026-10-09：Seedance / MiniMax 素材引用
+
+模型工作台及视频 Agent 的现有输入区支持输入 `@` 或点击 `@` 按钮选择当前素材，按图片、视频、音频筛选；可用方向键选择、回车或 Tab 插入、Esc 关闭。素材卡片显示对应编号，中文提示词例如：`以@图片2中的人物为主体，参考@视频1的运镜，使用@音频1作为背景音乐`。其他界面语言使用稳定的 `@image1 / @video1 / @audio1` 标记，避免将翻译后的名称误当上游协议。
+
+| 现有渠道 / 模板 | 提交时的引用形式 | 启用范围 |
+| --- | --- | --- |
+| 章鱼哥 `zex_video` 的 Seedance 2.0 / Mini / 2.5、MiniMax H3 / H3 Max | `图片 1 / 视频 1 / 音频 1` | 沿用各模板原有素材类型和数量；Seedance 2.5 仍仅支持图片 |
+| 火山方舟 `volcengine_seedance_2` | `图片1 / 视频1 / 音频1` | 现有 Seedance 2.0 多模态模板 |
+| Dola / TOpenRouter `topenrouter_seedance_2` | `图片1 / 视频1 / 音频1` | 复用项目已有方舟兼容请求转换 |
+| MiniMax 原生 / 透传 `minimax_h3_v2` | `<Picture 1> / <Video 1> / <Audio 1>` | 现有 H3 V2 模板，不将图片素材误标为 `<Subject N>` |
+
+- 不新增模板、不修改模型价格和计费公式。Grok、Hailuo 旧版、Seedance 旧版及未确认协议的通用渠道不自动启用引用选择。
+- 编号与最终提交的各类素材顺序一致；首尾帧按图片 1、图片 2 编号，原生渠道的重复素材去重和肖像资产前置同样纳入编号。
+- 删除或重排素材后按素材身份更新引用，被删除的引用标为 `@图片?` 等并提示重新选择；切换组合不再携带隐藏的旧素材参数。
+- API 在任务创建、任务重试、视频 Agent 创建和重试冻结余额之前校验引用所属类型和编号；Worker 根据最终线路转换提示词，保留原始任务文本，备用渠道切换不会继承错误的提示词格式。
+- 补充审计修复了连续引用漏检、重复素材编号改写，以及视频 Agent 提交时恢复已隐藏素材的问题。邮箱及普通文本保持原样。
+- 本次完成 335 项前端回归、Web 类型检查、前后端静态检查、API 与 Worker 全部 Go 测试。隔离数据库和模拟上游验证了无效引用在冻结前被拒绝、首尾帧顺序、成功扣费、失败解冻及重复投递不重复扣费；浏览器组件预览检查了键盘插入、删除后重新编号、素材组合切换及主题显示。未发起上游收费生成。
+
+协议依据：[章鱼哥 Seedance](https://6l0ket291i.apifox.cn/521606855e0)、[章鱼哥 MiniMax](https://6l0ket291i.apifox.cn/521606932e0)、[火山方舟 Seedance 提示词指南](https://docs.volcengine.com/docs/ark/seedance-2-0-prompt-guide?lang=zh&redirect=1)、[MiniMax 官方素材引用指南](https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md)、[MiniMax H3 多模态 API](https://platform.minimax.io/docs/api-reference/video-generation-v2-h3-context-ir)。这些验证覆盖请求格式，不等同于每个中转商的实际模型生成质量验证。

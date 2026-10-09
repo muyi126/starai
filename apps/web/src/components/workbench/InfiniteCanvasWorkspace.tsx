@@ -62,6 +62,7 @@ import type { Model } from "@starai/shared-types";
 import {
   buildAudioTaskParams,
   buildVideoTaskParams,
+  videoReferenceToken,
   parseAudioRuntime,
   parseVideoRuntime,
 } from "@starai/shared-types";
@@ -2153,7 +2154,7 @@ function FramePairBatchGeneratorNode({ id, data, selected }: { id: string; data:
 
 function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const actions = useContext(CanvasNodeActions);
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [copied, setCopied] = useState(false);
   const [editingOutput, setEditingOutput] = useState(false);
   const [outputDraft, setOutputDraft] = useState("");
@@ -2607,9 +2608,9 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
         {isSeedanceFullReference && (referenceImages.length > 0 || referenceVideos.length > 0 || referenceAudios.length > 0) && (
           <div className="nodrag flex flex-wrap items-center gap-1">
             <span className="mr-0.5 text-[9px] text-gray-400">{t("canvas.node.quickReference")}</span>
-            {referenceImages.map((_, index) => <button key={`mention-image-${index}`} type="button" onClick={() => appendReferenceMention(`@${t("canvas.kind.image")}${index + 1}`)} className="rounded-md bg-pink-500/10 px-1.5 py-1 text-[9px] text-pink-500">@{t("canvas.kind.image")}{index + 1}</button>)}
-            {referenceVideos.map((_, index) => <button key={`mention-video-${index}`} type="button" onClick={() => appendReferenceMention(`@${t("canvas.kind.video")}${index + 1}`)} className="rounded-md bg-pink-500/10 px-1.5 py-1 text-[9px] text-pink-500">@{t("canvas.kind.video")}{index + 1}</button>)}
-            {referenceAudios.map((_, index) => <button key={`mention-audio-${index}`} type="button" onClick={() => appendReferenceMention(`@${t("canvas.kind.audio")}${index + 1}`)} className="rounded-md bg-violet-500/10 px-1.5 py-1 text-[9px] text-violet-500">@{t("canvas.kind.audio")}{index + 1}</button>)}
+            {referenceImages.map((_, index) => <button key={`mention-image-${index}`} type="button" onClick={() => appendReferenceMention(videoReferenceToken({ kind: "image", index: index + 1 }, locale))} className="rounded-md bg-pink-500/10 px-1.5 py-1 text-[9px] text-pink-500">{videoReferenceToken({ kind: "image", index: index + 1 }, locale)}</button>)}
+            {referenceVideos.map((_, index) => <button key={`mention-video-${index}`} type="button" onClick={() => appendReferenceMention(videoReferenceToken({ kind: "video", index: index + 1 }, locale))} className="rounded-md bg-pink-500/10 px-1.5 py-1 text-[9px] text-pink-500">{videoReferenceToken({ kind: "video", index: index + 1 }, locale)}</button>)}
+            {referenceAudios.map((_, index) => <button key={`mention-audio-${index}`} type="button" onClick={() => appendReferenceMention(videoReferenceToken({ kind: "audio", index: index + 1 }, locale))} className="rounded-md bg-violet-500/10 px-1.5 py-1 text-[9px] text-violet-500">{videoReferenceToken({ kind: "audio", index: index + 1 }, locale)}</button>)}
           </div>
         )}
         <div className="space-y-1.5 border-t border-gray-100 pt-2 dark:border-white/10">

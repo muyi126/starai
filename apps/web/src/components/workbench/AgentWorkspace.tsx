@@ -12,6 +12,10 @@ import { api, apiForLocaleCached, uploadAsset } from "@/lib/api";
 import type { Model } from "@starai/shared-types";
 import {
   buildVideoTaskParams,
+  selectVideoTaskMedia,
+  supportsVideoPromptReferences,
+  videoPromptReferences,
+  invalidVideoReferences,
   EMPTY_VIDEO_MEDIA,
   parseVideoRuntime,
   schemaDefaultsFromFields,
@@ -21,6 +25,7 @@ import { AGENT_THEMES } from "./categoryMeta";
 import { ChatTopTools, type BottomBarState } from "./BottomBar";
 import { VideoOptionToolbar } from "./video/VideoOptionToolbar";
 import { VideoUploadArea } from "./video/VideoUploadArea";
+import { VideoPromptTextarea } from "./video/VideoPromptTextarea";
 import { MediaMenuOption, MediaOptionMenu } from "./MediaOptionMenu";
 import { ALL_RATIOS, ImageGenerationToolbar, buildImageGenerationParams, normalizeRatio, normalizeTier, type ImageAspectRatio, type ImageSizeTier } from "./ImageGenerationToolbar";
 import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } from "./GenerationLanguageMenu";
@@ -551,6 +556,9 @@ export function AgentWorkspace({ code }: { code: string }) {
   const videoMaterialMode = (generationModel?.runtime_rule?.upstream as { adapter?: string })?.adapter === "zex_video"
     || ["seedance_2", "minimax_h3", "aliyun_multimodal", "gateway_reference", "veo_reference", "omni_reference"].includes(String(videoConfig.upload_profile)) || String(videoConfig.upload_profile).startsWith("aliyun_happyhorse_")
     ? String(params[videoConfig.mode_param || "generation_mode"] || "text") : undefined;
+  const videoMentionsEnabled = isVideoGeneration && supportsVideoPromptReferences(generationModel);
+  const selectedVideoMedia = useMemo(() => selectVideoTaskMedia(params, videoMedia, generationModel?.runtime_rule), [params, videoMedia, generationModel?.runtime_rule]);
+  const promptReferences = useMemo(() => videoMentionsEnabled ? videoPromptReferences(params, videoMedia, generationModel?.runtime_rule) : [], [videoMentionsEnabled, params, videoMedia, generationModel?.runtime_rule]);
   const generationImageRuntime = (generationModel?.runtime_rule?.image || {}) as Record<string, unknown>;
   const configuredImageTiers = Array.isArray(generationImageRuntime.supported_size_tiers) ? generationImageRuntime.supported_size_tiers : generationImageRuntime.supported_sizes;
   const generationImageTiers = Array.isArray(configuredImageTiers)
@@ -822,8 +830,10 @@ export function AgentWorkspace({ code }: { code: string }) {
   };
 
   const run = async () => {
+    const invalidMentions = videoMentionsEnabled ? invalidVideoReferences(prompt, promptReferences) : [];
+    if (invalidMentions.length) { alert(t("video.mentionInvalid", { references: invalidMentions.join("、") })); return; }
     if (!workflow || submitting) return;
-    const hasVideoMedia = !!(videoMedia.first_frame || videoMedia.last_frame || videoMedia.reference_images.length);
+    const hasVideoMedia = !!(selectedVideoMedia.first_frame || selectedVideoMedia.last_frame || selectedVideoMedia.reference_images.length || selectedVideoMedia.reference_videos.length || selectedVideoMedia.reference_audios.length);
     if (requireReferenceImage && !productImage && !hasVideoMedia) {
       setError(t("agent.errorNeedReference"));
       return;
@@ -841,7 +851,7 @@ export function AgentWorkspace({ code }: { code: string }) {
     try {
       const selectedAssets = bottom.asset_ids?.length ? { asset_ids: bottom.asset_ids } : {};
       const videoParams = isVideoGeneration && generationModel
-        ? buildVideoTaskParams(params, videoMedia, generationModel.runtime_rule)
+        ? buildVideoTaskParams(params, selectedVideoMedia, generationModel.runtime_rule)
         : {};
       const imageParams = !isVideoGeneration
         ? buildImageGenerationParams({ count: isDetailPageScene ? detailSectionCount : count, ratio: imageRatio, imageSize })
@@ -849,16 +859,18 @@ export function AgentWorkspace({ code }: { code: string }) {
       const languageParams = buildLanguageParams(selectedLanguage);
       const imageURL =
         productImage?.url ||
-        videoMedia.reference_images[0]?.url ||
-        videoMedia.first_frame?.url ||
-        videoMedia.last_frame?.url ||
+        selectedVideoMedia.reference_images[0]?.url ||
+        selectedVideoMedia.first_frame?.url ||
+        selectedVideoMedia.last_frame?.url ||
         "";
       const comicReferenceURLs = [productImage?.url, ...videoMedia.reference_images.map((item) => item.url)].filter((item): item is string => !!item);
       const referenceAssetIds = [
         productImage?.public_id,
-        videoMedia.first_frame?.public_id,
-        videoMedia.last_frame?.public_id,
-        ...videoMedia.reference_images.map((x) => x.public_id),
+        selectedVideoMedia.first_frame?.public_id,
+        selectedVideoMedia.last_frame?.public_id,
+        ...selectedVideoMedia.reference_images.map((x) => x.public_id),
+        ...selectedVideoMedia.reference_videos.map((x) => x.public_id),
+        ...selectedVideoMedia.reference_audios.map((x) => x.public_id),
       ].filter((x): x is string => !!x);
       const scenePrompt = clientScenePrompt(selectedSceneMeta.code, selectedSceneMeta.label, generationType, creativeMode);
       const userPrompt = [prompt.trim(), code === "ecommerce_image" ? [commerceBrief.channel && `发布渠道：${commerceBrief.channel}`, commerceBrief.audience && `目标受众：${commerceBrief.audience}`, commerceBrief.visual && `视觉风格：${commerceBrief.visual}`].filter(Boolean).join("\n") : ""].filter(Boolean).join("\n\n");
@@ -866,8 +878,7 @@ export function AgentWorkspace({ code }: { code: string }) {
         method: "POST",
         body: JSON.stringify({
           inputs: {
-            ...params,
-            ...videoParams,
+            ...(isVideoGeneration ? videoParams : params),
             ...imageParams,
             ...languageParams,
             ...selectedAssets,
@@ -2104,7 +2115,7 @@ export function AgentWorkspace({ code }: { code: string }) {
             </div>
             {!usesInlineReferenceInput && supportReferenceImage && <div className="px-3 pt-3 sm:px-4">
               {isVideoGeneration && generationModel ? (
-                <VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} />
+                <VideoUploadArea references={videoMentionsEnabled ? promptReferences : undefined} config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} />
               ) : (
                 <div className="scroll-x-only flex flex-nowrap items-center gap-2 h-16 min-w-0">
                   {productImage ? (
@@ -2137,8 +2148,8 @@ export function AgentWorkspace({ code }: { code: string }) {
               {code === "general_image" && supportReferenceImage && <div className="flex shrink-0 items-center py-3 pl-3 pr-1">
                 {productImage ? <div className="group/img relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-gray-100 shadow-sm dark:border-white/10 dark:bg-white/5"><Image src={productImage.url} alt={productImage.name} width={128} height={128} sizes="64px" className="h-full w-full object-cover" /><button type="button" aria-label={t("common.remove")} onClick={() => setProductImage(null)} className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-90 transition sm:opacity-0 sm:group-hover/img:opacity-100"><X size={11}/></button></div> : <label title={t("asset.uploadImage")} className="flex h-16 w-20 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-gray-200 bg-gray-50 text-gray-500 shadow-sm transition hover:border-primary/50 hover:bg-primary/5 dark:border-white/15 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-primary/10">{uploading ? <Loader2 size={18} className="animate-spin text-primary"/> : <Plus size={18}/>}<span className="px-1 text-center text-[10px] leading-none">{t("asset.uploadImage")}</span><input aria-label={t("asset.uploadImage")} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" disabled={uploading} onChange={e => {handleUpload(e.target.files?.[0]);e.target.value="";}}/></label>}
               </div>}
-              {code === "ecommerce_video" && supportReferenceImage && isVideoGeneration && generationModel && <div className="scroll-x-only max-h-[88px] max-w-[52%] shrink-0 overflow-auto py-3 pl-3 pr-1"><VideoUploadArea config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} /></div>}
-              <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={code === "ecommerce_image" ? ts("一句话描述想要的效果，或只上传图片让 AI 自由发挥；需要保留的内容直接写出来。") : code === "ecommerce_video" ? ts("一句话描述想做的带货视频，也可以只上传素材让 AI 自动完成脚本与成片。") : code === "general_image" ? ts("描述想生成的画面；左侧可上传参考图，并补充主体、构图、风格和光线要求。") : workflow ? td(`agent.${workflow.code}.input.placeholder`, display.input?.placeholder || t("agent.inputPlaceholder")) : (display.input?.placeholder || t("agent.inputPlaceholder"))} rows={3} className="min-h-[88px] min-w-0 flex-1 resize-none bg-transparent px-4 pb-10 pt-3 pr-14 text-sm text-gray-700 focus:outline-none placeholder:text-gray-400 leading-relaxed dark:text-gray-100 dark:placeholder:text-gray-500" />
+              {code === "ecommerce_video" && supportReferenceImage && isVideoGeneration && generationModel && <div className="scroll-x-only max-h-[88px] max-w-[52%] shrink-0 overflow-auto py-3 pl-3 pr-1"><VideoUploadArea references={videoMentionsEnabled ? promptReferences : undefined} config={videoUploadConfig} media={videoMedia} onChange={setVideoMedia} mode={videoMaterialMode} /></div>}
+              <VideoPromptTextarea enabled={videoMentionsEnabled} references={promptReferences} onValueChange={setPrompt} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={code === "ecommerce_image" ? ts("一句话描述想要的效果，或只上传图片让 AI 自由发挥；需要保留的内容直接写出来。") : code === "ecommerce_video" ? ts("一句话描述想做的带货视频，也可以只上传素材让 AI 自动完成脚本与成片。") : code === "general_image" ? ts("描述想生成的画面；左侧可上传参考图，并补充主体、构图、风格和光线要求。") : workflow ? td(`agent.${workflow.code}.input.placeholder`, display.input?.placeholder || t("agent.inputPlaceholder")) : (display.input?.placeholder || t("agent.inputPlaceholder"))} rows={3} className="min-h-[88px] min-w-0 flex-1 resize-none bg-transparent px-4 pb-10 pt-3 pr-14 text-sm text-gray-700 focus:outline-none placeholder:text-gray-400 leading-relaxed dark:text-gray-100 dark:placeholder:text-gray-500" />
               {usesCompactCommerceInput && <button type="button" onClick={() => void enhanceCommercePrompt()} disabled={!prompt.trim() || promptEnhancing} aria-label={ts("增强提示词")} title={ts("增强当前场景的提示词")} className="absolute bottom-2 right-3 flex h-9 w-9 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-500 shadow-sm transition hover:border-primary/50 hover:bg-primary/10 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/15 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-primary/15 dark:hover:text-white">
                 {promptEnhancing ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
               </button>}

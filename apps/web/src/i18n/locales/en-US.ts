@@ -1274,4 +1274,11 @@ Object.assign(dictionary, {
   "pricing.currencyCny": "{value} CNY"
 });
 
+Object.assign(dictionary, {
+  "video.mentionOpen": "Mention a reference",
+  "video.mentionHint": "Type @ to reference uploaded media",
+  "video.mentionEmpty": "No matching media. Upload or choose from the asset library first.",
+  "video.mentionInvalid": "References {references} are unavailable. Choose media in the current mode again."
+});
+
 export default dictionary;

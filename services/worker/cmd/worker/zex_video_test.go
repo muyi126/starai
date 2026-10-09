@@ -158,6 +158,9 @@ func TestZexResumedTaskBillingDatabase(t *testing.T) {
 					if payload["model"] != fmt.Sprintf("seedance-2.5-%ds", tt.seconds) || payload["seconds"] != fmt.Sprint(tt.seconds) {
 						t.Errorf("model/duration mismatch: %#v", payload)
 					}
+					if payload["prompt"] != "图片 2参考图片 1" || !reflect.DeepEqual(payload["images"], []interface{}{"https://e.test/first", "https://e.test/last"}) {
+						t.Errorf("reference prompt/order mismatch: %#v", payload)
+					}
 					if _, sent := payload["resolution"]; sent {
 						t.Errorf("fixed model must use server default resolution: %#v", payload)
 					}
@@ -202,7 +205,7 @@ func TestZexResumedTaskBillingDatabase(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			input := map[string]interface{}{"prompt": "audit", "duration": tt.seconds, "resolution": "auto", "_price_rule_snapshot": prices}
+			input := map[string]interface{}{"prompt": "@图片2参考@图片1", "generation_mode": "first_last", "first_frame": "https://e.test/first", "last_frame": "https://e.test/last", "duration": tt.seconds, "resolution": "auto", "_price_rule_snapshot": prices}
 			var receipt interface{} = "accepted"
 			if tt.submit {
 				receipt = nil
@@ -224,6 +227,9 @@ func TestZexResumedTaskBillingDatabase(t *testing.T) {
 				if err = processImageTask(ctx, pool, server.URL, "", p); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if p.Input["prompt"] != "@图片2参考@图片1" {
+				t.Fatal("upstream conversion changed the persisted task prompt")
 			}
 			var status, freezeStatus string
 			var actual, balance, frozen, provider float64

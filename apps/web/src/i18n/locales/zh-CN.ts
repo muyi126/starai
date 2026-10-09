@@ -1162,4 +1162,11 @@ Object.assign(dictionary, {
   "pricing.currencyCny": "{value} 元"
 });
 
+Object.assign(dictionary, {
+  "video.mentionOpen": "引用素材",
+  "video.mentionHint": "输入 @ 引用已上传素材",
+  "video.mentionEmpty": "没有匹配的素材，请先上传或从资产库选择",
+  "video.mentionInvalid": "素材引用 {references} 已失效，请重新选择当前组合中的素材"
+});
+
 export default dictionary;

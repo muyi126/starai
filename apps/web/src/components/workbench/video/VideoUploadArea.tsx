@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import { ArrowRight, Film, Music2, Plus, UserRound, X } from "lucide-react";
-import type { VideoMediaItem, VideoMediaState, VideoRuntimeConfig } from "@starai/shared-types";
-import { videoReferenceCapacity } from "@starai/shared-types";
+import type { VideoMediaItem, VideoMediaState, VideoRuntimeConfig, VideoPromptReference } from "@starai/shared-types";
+import { videoReferenceCapacity, videoReferenceToken } from "@starai/shared-types";
 import { uploadAsset } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
 import { SeedancePortraitDialog } from "./SeedancePortraitDialog";
@@ -139,10 +139,12 @@ function FilledImageCard({
 function FilledFileCard({
   item,
   kind,
+  badge,
   onRemove,
 }: {
   item: VideoMediaItem;
   kind: "video" | "audio";
+  badge?: string;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
@@ -151,6 +153,7 @@ function FilledFileCard({
     <div className="group/file relative flex h-14 w-[4.5rem] shrink-0 flex-col items-center justify-center gap-0.5 overflow-hidden rounded-xl border border-gray-200 bg-white px-1.5 shadow-sm dark:border-white/10 dark:bg-white/5">
       <Icon size={18} className="text-primary" />
       <span className="w-full truncate text-center text-[10px] text-gray-500 dark:text-gray-300">{item.name}</span>
+      {badge && <span className="rounded bg-primary/10 px-1 text-[10px] text-primary">{badge}</span>}
       <button
         type="button"
         onClick={onRemove}
@@ -165,6 +168,7 @@ function FilledFileCard({
 
 function ReferenceImageStack({
   images,
+  references,
   max,
   uploading,
   onUpload,
@@ -172,13 +176,14 @@ function ReferenceImageStack({
   compact,
 }: {
   images: VideoMediaItem[];
+  references?: VideoPromptReference[];
   max: number;
   uploading?: boolean;
   onUpload: (files: FileList | null) => void;
   onRemove: (index: number) => void;
   compact?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const canAdd = images.length < max;
 
   if (images.length === 0) {
@@ -190,9 +195,11 @@ function ReferenceImageStack({
 
   return (
     <div className={compact ? "flex min-h-14 max-w-full flex-wrap items-center gap-1.5" : "scroll-x-only flex h-16 w-full shrink-0 flex-nowrap items-center gap-2"}>
-      {images.map((img, i) => (
-        <FilledImageCard key={img.url} image={img} compact={compact} onRemove={() => onRemove(i)} />
-      ))}
+      {images.map((img, i) => {
+        const matches = references?.filter(item => item.kind === "image" && item.url === img.url);
+        const reference = matches?.[images.slice(0, i).filter(item => item.url === img.url).length] || matches?.[0];
+        return <FilledImageCard key={`${img.url}-${i}`} image={img} badge={reference ? videoReferenceToken(reference, locale).slice(1) : undefined} compact={compact} onRemove={() => onRemove(i)} />;
+      })}
       {canAdd && <AddMoreButton uploading={uploading} multiple onUpload={onUpload} />}
     </div>
   );
@@ -219,6 +226,7 @@ function FrameSlot({
 
 export function VideoUploadArea({
   config,
+  references,
   media,
   onChange,
   mode,
@@ -231,6 +239,7 @@ export function VideoUploadArea({
   onDraftTaskIdChange,
 }: {
   config: VideoRuntimeConfig;
+  references?: VideoPromptReference[];
   media: VideoMediaState;
   onChange: (next: VideoMediaState) => void;
   mode?: string;
@@ -242,7 +251,12 @@ export function VideoUploadArea({
   draftTaskId?: string;
   onDraftTaskIdChange?: (value: string) => void;
 }) {
-  const { t, ts } = useI18n();
+  const { t, locale } = useI18n();
+  const referenceLabel = (url?: string, kind?: VideoPromptReference["kind"], occurrence = 0) => {
+    const matches = references?.filter(item => item.url === url && (!kind || item.kind === kind));
+    const reference = matches?.[occurrence] || matches?.[0];
+    return reference ? videoReferenceToken(reference, locale).slice(1) : undefined;
+  };
   const [uploading, setUploading] = useState(false);
   const [portraitLibraryOpen, setPortraitLibraryOpen] = useState(false);
   const profile = config.upload_profile || "single_ref";
@@ -342,7 +356,7 @@ export function VideoUploadArea({
     const profileLimit = profile === "omni_reference" ? 7 : 3;
     const max = Math.min(profileLimit, config.reference_images?.max ?? config.max_reference_images ?? profileLimit);
     return (
-      <ReferenceImageStack
+      <ReferenceImageStack references={references}
         images={media.reference_images}
         max={max}
         uploading={uploading}
@@ -365,7 +379,7 @@ export function VideoUploadArea({
         <div className="flex min-h-16 w-fit max-w-full flex-nowrap items-center gap-2">
           {showFirst && (
             <FrameSlot
-              label={t("video.firstFrame")}
+              label={[t("video.firstFrame"), referenceLabel(media.first_frame?.url)].filter(Boolean).join(" · ")}
               image={media.first_frame}
               uploading={uploading}
               onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))}
@@ -375,7 +389,7 @@ export function VideoUploadArea({
           {showFirst && showLast && <ArrowRight size={15} className="shrink-0 text-gray-300" />}
           {showLast && (
             <FrameSlot
-              label={t("video.lastFrame")}
+              label={[t("video.lastFrame"), referenceLabel(media.last_frame?.url, "image", showFirst && media.first_frame?.url === media.last_frame?.url ? 1 : 0)].filter(Boolean).join(" · ")}
               image={media.last_frame}
               uploading={uploading}
               onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, last_frame: item }))}
@@ -387,7 +401,7 @@ export function VideoUploadArea({
     }
     if (profile === "aliyun_happyhorse_reference") {
       return (
-        <ReferenceImageStack
+        <ReferenceImageStack references={references}
           images={media.reference_images}
           max={referenceBudget.reference_images}
           uploading={uploading}
@@ -404,7 +418,7 @@ export function VideoUploadArea({
     return (
       <div className="flex min-h-14 w-fit max-w-full flex-wrap items-center gap-1.5">
         {budgetNotice}
-        {showImages && <ReferenceImageStack
+        {showImages && <ReferenceImageStack references={references}
           images={media.reference_images}
           max={referenceBudget.reference_images}
           uploading={uploading}
@@ -416,9 +430,9 @@ export function VideoUploadArea({
         {showVideos && <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
           {media.reference_videos.map((item, index) => (
             <FilledFileCard
-              key={item.url}
+              key={`${item.url}-${index}`}
               item={item}
-              kind="video"
+              kind="video" badge={referenceLabel(item.url, "video", media.reference_videos.slice(0, index).filter(previous => previous.url === item.url).length)}
               onRemove={() => onChange({ ...media, reference_videos: media.reference_videos.filter((_, i) => i !== index) })}
             />
           ))}
@@ -440,9 +454,9 @@ export function VideoUploadArea({
         {showAudios && <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
           {media.reference_audios.map((item, index) => (
             <FilledFileCard
-              key={item.url}
+              key={`${item.url}-${index}`}
               item={item}
-              kind="audio"
+              kind="audio" badge={referenceLabel(item.url, "audio", media.reference_audios.slice(0, index).filter(previous => previous.url === item.url).length)}
               onRemove={() => onChange({ ...media, reference_audios: media.reference_audios.filter((_, i) => i !== index) })}
             />
           ))}
@@ -524,7 +538,7 @@ export function VideoUploadArea({
         )}
         {showPortrait && <ArrowRight size={13} className="shrink-0 text-gray-300" />}
         {showImages && (
-          <ReferenceImageStack
+          <ReferenceImageStack references={references}
             images={media.reference_images}
             max={referenceBudget.reference_images}
             uploading={uploading}
@@ -538,9 +552,9 @@ export function VideoUploadArea({
           <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
             {media.reference_videos.map((item, index) => (
               <FilledFileCard
-                key={item.url}
+                key={`${item.url}-${index}`}
                 item={item}
-                kind="video"
+                kind="video" badge={referenceLabel(item.url, "video", media.reference_videos.slice(0, index).filter(previous => previous.url === item.url).length)}
                 onRemove={() => onChange({ ...media, reference_videos: media.reference_videos.filter((_, i) => i !== index) })}
               />
             ))}
@@ -564,9 +578,9 @@ export function VideoUploadArea({
           <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
             {media.reference_audios.map((item, index) => (
               <FilledFileCard
-                key={item.url}
+                key={`${item.url}-${index}`}
                 item={item}
-                kind="audio"
+                kind="audio" badge={referenceLabel(item.url, "audio", media.reference_audios.slice(0, index).filter(previous => previous.url === item.url).length)}
                 onRemove={() => onChange({ ...media, reference_audios: media.reference_audios.filter((_, i) => i !== index) })}
               />
             ))}
@@ -601,14 +615,14 @@ export function VideoUploadArea({
   }
 
   if (profile === "first_frame") {
-    return <FrameSlot label={t("video.firstFrame")} image={media.first_frame} uploading={uploading} onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))} onRemove={() => onChange({ ...media, first_frame: null })} />;
+    return <FrameSlot label={[t("video.firstFrame"), referenceLabel(media.first_frame?.url)].filter(Boolean).join(" · ")} image={media.first_frame} uploading={uploading} onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))} onRemove={() => onChange({ ...media, first_frame: null })} />;
   }
 
   if (profile === "veo_frame_pair") {
     return (
       <div className="scroll-x-only flex h-16 w-full flex-nowrap items-center gap-2">
         <FrameSlot
-          label={t("video.firstFrame")}
+          label={[t("video.firstFrame"), referenceLabel(media.first_frame?.url)].filter(Boolean).join(" · ")}
           image={media.first_frame}
           uploading={uploading}
           onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))}
@@ -618,7 +632,7 @@ export function VideoUploadArea({
           <ArrowRight size={16} />
         </div>
         <FrameSlot
-          label={t("video.lastFrame")}
+          label={[t("video.lastFrame"), referenceLabel(media.last_frame?.url)].filter(Boolean).join(" · ")}
           image={media.last_frame}
           uploading={uploading}
           onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, last_frame: item }))}
@@ -652,7 +666,7 @@ export function VideoUploadArea({
           onRemove={() => onChange({ ...media, last_frame: null })}
         />
         {max > 0 && (
-          <ReferenceImageStack
+          <ReferenceImageStack references={references}
             images={media.reference_images}
             max={max}
             uploading={uploading}
@@ -667,7 +681,7 @@ export function VideoUploadArea({
   if (profile === "multi_ref") {
     const max = config.max_reference_images ?? 9;
     return (
-      <ReferenceImageStack
+      <ReferenceImageStack references={references}
         images={media.reference_images}
         max={max}
         uploading={uploading}
@@ -681,7 +695,7 @@ export function VideoUploadArea({
   if (max <= 0) return null;
 
   return (
-    <ReferenceImageStack
+    <ReferenceImageStack references={references}
       images={media.reference_images}
       max={max}
       uploading={uploading}
